@@ -1,0 +1,47 @@
+# =========================
+# BACKEND
+# =========================
+
+# Antigravity IDE config (contains secrets)
+.antigravity
+
+backend/.env
+backend/node_modules/
+backend/atlas-credentials.env
+
+backend/ffmpeg.exe
+backend/ffplay.exe
+backend/ffprobe.exe
+backend/yt-dlp.exe
+
+backend/dqw_info.json
+backend/download dlp.zip
+
+
+# =========================
+# FRONTEND
+# =========================
+
+frontend/logs/
+frontend/*.log
+frontend/npm-debug.log*
+frontend/yarn-debug.log*
+frontend/yarn-error.log*
+frontend/pnpm-debug.log*
+frontend/lerna-debug.log*
+
+frontend/node_modules/
+frontend/dist/
+frontend/dist-ssr/
+frontend/*.local
+
+frontend/.vscode/*
+!frontend/.vscode/extensions.json
+
+frontend/.idea/
+frontend/.DS_Store
+frontend/*.suo
+frontend/*.ntvs*
+frontend/*.njsproj
+frontend/*.sln
+frontend/*.sw?
