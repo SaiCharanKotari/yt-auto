@@ -1,4 +1,4 @@
-import instagramGetUrl from 'instagram-url-direct';
+import { instagramGetUrl } from 'instagram-url-direct';
 
 async function test() {
     try {

@@ -3,8 +3,13 @@ import { useSearchParams, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Download, Sparkles, Play, Pause, PlaySquare, Volume2, VolumeX, CheckCircle, AlertCircle, Loader2, Copy, ArrowLeft, Image } from 'lucide-react';
 import * as Slider from '@radix-ui/react-slider';
+import YouTube, { type YouTubePlayer } from 'react-youtube';
 
-
+function extractYouTubeId(url: string | null): string | null {
+  if (!url) return null;
+  const match = url.match(/^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|&v=|shorts\/)([^#&?]*).*/);
+  return (match && match[2].length === 11) ? match[2] : null;
+}
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 function formatTime(seconds: number) {
@@ -38,8 +43,7 @@ function estimateSize(tbr: number | undefined, trimDurationSec: number): string 
 }
 
 
-// Heights we want to show — in descending order
-const TARGET_HEIGHTS = [2160, 1440, 1080, 720, 480, 360, 240, 144];
+
 
 interface QualityOption {
   label: string;        // e.g. "1080p"
@@ -102,30 +106,6 @@ export default function VideoPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError]         = useState('');
 
-  // player
-  const videoRef       = useRef<HTMLVideoElement>(null);
-  const sliderWrapRef  = useRef<HTMLDivElement>(null);
-  const [isPlaying,    setIsPlaying]    = useState(false);
-  const [isMuted,      setIsMuted]      = useState(false);
-  const [currentTime,  setCurrentTime]  = useState(0);
-
-  const [isDraggingRange, setIsDraggingRange] = useState(false);
-
-  // Seek video from a mouse event on the slider wrapper
-  const seekFromEvent = (e: React.MouseEvent) => {
-    if (!sliderWrapRef.current || !videoRef.current) return;
-    const rect = sliderWrapRef.current.getBoundingClientRect();
-    const pct  = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
-    const time = pct * (metadata?.duration || 0);
-    // Clamp to trim range so red stays inside the trim
-    const clamped = Math.min(trimRange[1], Math.max(trimRange[0], time));
-    videoRef.current.currentTime = clamped;
-    setCurrentTime(clamped);
-  };
-
-  // The muxed (audio+video) URL used for preview playback
-  const [previewUrl, setPreviewUrl] = useState('');
-
   // Quality options derived from metadata
   const [qualityOptions, setQualityOptions] = useState<QualityOption[]>([]);
 
@@ -154,6 +134,69 @@ export default function VideoPage() {
   const [aspectRatio, setAspectRatio] = useState('original');
   const [fitMode, setFitMode] = useState<'crop' | 'pad'>('crop');
 
+  // player
+  const youtubePlayerRef = useRef<YouTubePlayer | null>(null);
+  const sliderWrapRef  = useRef<HTMLDivElement>(null);
+  const [isPlaying,    setIsPlaying]    = useState(false);
+  const [isMuted,      setIsMuted]      = useState(false);
+  const [currentTime,  setCurrentTime]  = useState(0);
+
+  const isDraggingRange = useRef(false);
+  const youtubeId = extractYouTubeId(url);
+
+  // Seek video based on a raw clientX position over the track
+  const seekFromClientX = (clientX: number) => {
+    if (!sliderWrapRef.current || !youtubePlayerRef.current) return;
+    const rect = sliderWrapRef.current.getBoundingClientRect();
+    const pct  = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
+    const time = pct * (metadata?.duration || 0);
+    youtubePlayerRef.current.seekTo(time, true);
+    setCurrentTime(time);
+  };
+
+  // Attach document-level listeners so drag works even when cursor leaves the track
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      if (!isDraggingRange.current) return;
+      seekFromClientX(e.clientX);
+    };
+    const onUp = () => { isDraggingRange.current = false; };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+    return () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    };
+  }, [metadata?.duration]);
+
+  // Sync current time from YouTube player
+  useEffect(() => {
+    let animationFrameId: number;
+    const updateTime = async () => {
+      if (youtubePlayerRef.current && isPlaying) {
+        try {
+          const time = await youtubePlayerRef.current.getCurrentTime();
+          setCurrentTime(time);
+          
+          if (trimRange[1] > 0) {
+            if (time >= trimRange[1]) {
+              youtubePlayerRef.current.seekTo(trimRange[0], true);
+            } else if (time < trimRange[0]) {
+              youtubePlayerRef.current.seekTo(trimRange[0], true);
+            }
+          }
+        } catch (e) {
+          // ignore transient errors
+        }
+      }
+      animationFrameId = requestAnimationFrame(updateTime);
+    };
+    if (isPlaying) {
+      animationFrameId = requestAnimationFrame(updateTime);
+    }
+    return () => cancelAnimationFrame(animationFrameId);
+  }, [isPlaying, trimRange]);
+
   // ── Fetch metadata ──────────────────────────────────────────────────────────
   useEffect(() => {
     if (!url) return;
@@ -168,53 +211,49 @@ export default function VideoPage() {
         setMetadata(data);
         setCustomFileName(data.title || 'video');
 
-        // ── 1. Find a video URL for preview ───────────────────
-        const formats = data.formats || [];
-        const muxed = formats.filter((f: any) =>
-          f.url && f.vcodec && f.vcodec !== 'none' && f.acodec && f.acodec !== 'none'
-        );
-        const videoOnly = formats.filter((f: any) =>
-          f.url && f.vcodec && f.vcodec !== 'none'
-        );
-
-        const f18 = muxed.find((f: any) => String(f.format_id) === '18');
-        const bestFormat = f18 || (muxed.length > 0 ? muxed[muxed.length - 1] : (videoOnly.length > 0 ? videoOnly[0] : null));
-
-        if (bestFormat?.url) {
-          // Route through backend proxy to prevent CORS & 403 Referer blocks
-          const proxiedUrl = `http://localhost:3001/api/video/proxy?url=${encodeURIComponent(bestFormat.url)}`;
-          setPreviewUrl(proxiedUrl);
-        }
+        // ── 1. Video ID is already extracted via state ───────────────────
 
         // ── 2. Build quality options ────────────────────────────────────────
-        // Find the best format for each target height
-        const opts: QualityOption[] = [];
-        for (const targetH of TARGET_HEIGHTS) {
-          // Look for a video-only or muxed format at this height
+        // Collect all unique heights from video-bearing formats.
+        // We do NOT filter on f.url here — yt-dlp handles the actual download
+        // using format strings (bestvideo[height=X]+bestaudio), so we just need
+        // to know which heights are available.
+        const heightSet = new Set<number>();
+        (data.formats || []).forEach((f: any) => {
+          if (!f.vcodec || f.vcodec === 'none') return; // audio-only, skip
+          const res = f.resolution || '';
+          const match = res.match(/\d+x(\d+)/);
+          if (match) {
+            const h = parseInt(match[1]);
+            if (h >= 144) heightSet.add(h); // ignore tiny thumbnails etc.
+          }
+        });
+
+        // Sort descending (highest quality first)
+        const sortedHeights = Array.from(heightSet).sort((a, b) => b - a);
+
+        const opts: QualityOption[] = sortedHeights.map(targetH => {
+          // Best candidate for size/tbr display (prefer muxed → highest tbr)
           const candidates = (data.formats || []).filter((f: any) => {
-            if (!f.url || !f.vcodec || f.vcodec === 'none') return false;
+            if (!f.vcodec || f.vcodec === 'none') return false;
             const res = f.resolution || '';
             const match = res.match(/\d+x(\d+)/);
             return match && parseInt(match[1]) === targetH;
           });
-          if (candidates.length === 0) continue;
-
-          // Prefer muxed, then highest tbr
           const muxedCand = candidates.filter((f: any) => f.acodec && f.acodec !== 'none');
-          const best = muxedCand.length > 0
-            ? muxedCand.reduce((a: any, b: any) => (b.tbr || 0) > (a.tbr || 0) ? b : a)
-            : candidates.reduce((a: any, b: any) => (b.tbr || 0) > (a.tbr || 0) ? b : a);
+          const best = (muxedCand.length > 0 ? muxedCand : candidates)
+            .reduce((a: any, b: any) => (b.tbr || 0) > (a.tbr || 0) ? b : a, candidates[0]);
 
-          opts.push({
+          return {
             label: `${targetH}p`,
             height: targetH,
-            format_id: best.format_id,
-            tbr: best.tbr,
-            filesize: best.filesize,
-            url: best.url,
-            hasMuxedAudio: best.acodec && best.acodec !== 'none',
-          });
-        }
+            format_id: best?.format_id || '',
+            tbr: best?.tbr,
+            filesize: best?.filesize,
+            url: best?.url,
+            hasMuxedAudio: !!(best?.acodec && best.acodec !== 'none'),
+          };
+        });
 
         setQualityOptions(opts);
         // Default download quality = highest available
@@ -330,8 +369,8 @@ export default function VideoPage() {
 
         if (start < end && end <= (metadata?.duration || 100)) {
           setTrimRange([start, end]);
-          if (videoRef.current) {
-            videoRef.current.currentTime = start;
+          if (youtubePlayerRef.current) {
+            youtubePlayerRef.current.seekTo(start, true);
           }
         }
       }
@@ -345,43 +384,22 @@ export default function VideoPage() {
 
   // ── Player Controls ────────────────────────────────────────────────────────
   const togglePlay = () => {
-    if (!previewUrl) {
-      alert("No preview available for this video stream. Please download the file instead.");
+    if (!youtubePlayerRef.current) {
+      alert("Preview is not ready yet.");
       return;
     }
-    if (!videoRef.current) return;
     
-    if (videoRef.current.paused) {
-      videoRef.current.play().catch(e => {
-        console.error('Play error:', e);
-        alert('Playback failed (video stream might be blocked or expired). Error: ' + e.message);
-      });
+    if (!isPlaying) {
+      youtubePlayerRef.current.playVideo();
     } else {
-      videoRef.current.pause();
-    }
-  };
-
-  const handleTimeUpdate = () => {
-    const v = videoRef.current;
-    if (!v) return;
-    setCurrentTime(v.currentTime);
-    
-    // Only loop if we have a valid end range
-    if (trimRange[1] > 0) {
-      if (v.currentTime >= trimRange[1]) {
-        v.currentTime = trimRange[0];
-        if (!v.paused) v.play().catch(console.error);
-      } else if (v.currentTime < trimRange[0]) {
-        v.currentTime = trimRange[0];
-      }
+      youtubePlayerRef.current.pauseVideo();
     }
   };
 
   const onSliderChange = (values: number[]) => {
-    const v = videoRef.current;
-    if (v) {
-      if (values[0] !== trimRange[0]) v.currentTime = values[0];
-      else if (values[1] !== trimRange[1]) v.currentTime = values[1];
+    if (youtubePlayerRef.current) {
+      if (values[0] !== trimRange[0]) youtubePlayerRef.current.seekTo(values[0], true);
+      else if (values[1] !== trimRange[1]) youtubePlayerRef.current.seekTo(values[1], true);
     }
     setTrimRange(values);
   };
@@ -462,7 +480,16 @@ export default function VideoPage() {
             {/* Top-right overlay: mute toggle */}
             <div className="absolute top-3 right-3 flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity z-10">
               <button
-                onClick={e => { e.stopPropagation(); setIsMuted(m => !m); }}
+                onClick={e => {
+                  e.stopPropagation();
+                  setIsMuted(m => {
+                    if (youtubePlayerRef.current) {
+                      if (!m) youtubePlayerRef.current.mute();
+                      else youtubePlayerRef.current.unMute();
+                    }
+                    return !m;
+                  });
+                }}
                 className="p-1.5 bg-black/70 rounded-lg border border-white/20 text-white backdrop-blur-md hover:bg-black/90 transition-colors cursor-pointer"
                 title={isMuted ? 'Unmute' : 'Mute'}
               >
@@ -472,20 +499,36 @@ export default function VideoPage() {
               </button>
             </div>
 
-            {previewUrl ? (
-              <video
-                ref={videoRef}
-                src={previewUrl}
-                poster={metadata?.thumbnail}
-                className={`w-full h-full ${aspectRatio !== 'original' ? (fitMode === 'crop' ? 'object-cover' : 'object-contain') : 'object-contain'}`}
-                onTimeUpdate={handleTimeUpdate}
-                onPlay={() => setIsPlaying(true)}
-                onPause={() => setIsPlaying(false)}
-                onError={e => console.error('Video error:', e)}
-                muted={isMuted}
-                playsInline
-                referrerPolicy="no-referrer"
-              />
+            {youtubeId ? (
+              <div className="absolute inset-0 pointer-events-none">
+                <YouTube
+                  videoId={youtubeId}
+                  className="w-full h-full"
+                  iframeClassName={`w-full h-full ${aspectRatio !== 'original' ? (fitMode === 'crop' ? 'object-cover' : 'object-contain') : 'object-contain'} scale-[1.2]`}
+                  opts={{
+                    width: '100%',
+                    height: '100%',
+                    playerVars: {
+                      autoplay: 0,
+                      controls: 0,
+                      disablekb: 1,
+                      fs: 0,
+                      modestbranding: 1,
+                      rel: 0,
+                      showinfo: 0,
+                      iv_load_policy: 3,
+                    },
+                  }}
+                  onReady={e => {
+                    youtubePlayerRef.current = e.target;
+                    if (isMuted) e.target.mute();
+                  }}
+                  onStateChange={e => {
+                    if (e.data === 1) setIsPlaying(true);
+                    else if (e.data === 2) setIsPlaying(false);
+                  }}
+                />
+              </div>
             ) : (
               <img src={metadata?.thumbnail} alt="thumb" className={`w-full h-full opacity-50 ${aspectRatio !== 'original' ? (fitMode === 'crop' ? 'object-cover' : 'object-contain') : 'object-cover'}`} />
             )}
@@ -494,9 +537,12 @@ export default function VideoPage() {
             <div className={`absolute inset-0 flex items-center justify-center gap-4 transition-opacity pointer-events-none ${isPlaying ? 'opacity-0 group-hover:opacity-100' : 'opacity-100'}`}>
               {/* ← 10s back */}
               <button
-                onClick={e => {
+                onClick={async e => {
                   e.stopPropagation();
-                  if (videoRef.current) videoRef.current.currentTime = Math.max(trimRange[0], videoRef.current.currentTime - 10);
+                  if (youtubePlayerRef.current) {
+                    const ct = await youtubePlayerRef.current.getCurrentTime();
+                    youtubePlayerRef.current.seekTo(Math.max(trimRange[0], ct - 10), true);
+                  }
                 }}
                 className="pointer-events-auto flex flex-col items-center gap-1 group/skip cursor-pointer"
                 title="Back 10 seconds"
@@ -527,9 +573,12 @@ export default function VideoPage() {
 
               {/* +10s forward */}
               <button
-                onClick={e => {
+                onClick={async e => {
                   e.stopPropagation();
-                  if (videoRef.current) videoRef.current.currentTime = Math.min(trimRange[1], videoRef.current.currentTime + 10);
+                  if (youtubePlayerRef.current) {
+                    const ct = await youtubePlayerRef.current.getCurrentTime();
+                    youtubePlayerRef.current.seekTo(Math.min(trimRange[1], ct + 10), true);
+                  }
                 }}
                 className="pointer-events-auto flex flex-col items-center gap-1 group/skip"
                 title="Forward 10 seconds"
@@ -548,7 +597,7 @@ export default function VideoPage() {
             {/* Bottom note about preview quality */}
             <div className="absolute bottom-3 left-3 opacity-0 group-hover:opacity-100 transition-opacity">
               <span className="text-xs bg-black/60 px-2 py-1 rounded-md text-white/70 backdrop-blur-sm">
-                Preview: 360p (with audio)
+                Preview: YouTube Embed
               </span>
             </div>
           </div>
@@ -563,6 +612,7 @@ export default function VideoPage() {
 
             {/* Slider + red playhead */}
             <div className="relative" ref={sliderWrapRef}>
+
               <Slider.Root
                 className="relative flex items-center select-none touch-none w-full h-6"
                 value={trimRange}
@@ -570,47 +620,30 @@ export default function VideoPage() {
                 step={1}
                 minStepsBetweenThumbs={1}
                 onValueChange={onSliderChange}
+                onPointerDown={e => {
+                  // If NOT clicking directly on a thumb → seek the red playhead,
+                  // don't let Radix jump a thumb to this position.
+                  const isThumb = (e.target as HTMLElement).closest('[role="slider"]');
+                  if (!isThumb) {
+                    e.preventDefault();   // stops Radix from moving any thumb
+                    seekFromClientX(e.clientX);
+                    isDraggingRange.current = true;
+                  }
+                  // If IS a thumb — do nothing, Radix handles the drag natively.
+                }}
               >
-                <Slider.Track className="bg-black/50 relative grow rounded-full h-2">
+                <Slider.Track className="bg-black/50 relative grow rounded-full h-2 cursor-pointer">
                   <Slider.Range className="absolute bg-primary rounded-full h-full" />
                 </Slider.Track>
-                <Slider.Thumb className="block w-[6px] h-10 bg-white shadow-[0_0_10px_rgba(255,255,255,0.5)] rounded focus:outline-none focus:ring-2 focus:ring-primary cursor-col-resize hover:scale-105 transition-transform" />
-                <Slider.Thumb className="block w-[6px] h-10 bg-white shadow-[0_0_10px_rgba(255,255,255,0.5)] rounded focus:outline-none focus:ring-2 focus:ring-primary cursor-col-resize hover:scale-105 transition-transform" />
+                <Slider.Thumb
+                  className="block w-[6px] h-10 bg-white shadow-[0_0_10px_rgba(255,255,255,0.5)] rounded focus:outline-none focus:ring-2 focus:ring-primary hover:scale-105 transition-transform"
+                  style={{ cursor: 'ew-resize' }}
+                />
+                <Slider.Thumb
+                  className="block w-[6px] h-10 bg-white shadow-[0_0_10px_rgba(255,255,255,0.5)] rounded focus:outline-none focus:ring-2 focus:ring-primary hover:scale-105 transition-transform"
+                  style={{ cursor: 'ew-resize' }}
+                />
               </Slider.Root>
-
-              {/* ── Transparent click/drag overlay over the BLUE range ──────────
-                  Intercepts mousedown/mousemove so clicking or dragging on the
-                  blue highlight seeks the red playhead WITHOUT moving the trimmers. */}
-              {metadata?.duration > 0 && (() => {
-                const total    = metadata.duration;
-                const leftPct  = (trimRange[0] / total) * 100;
-                const widthPct = ((trimRange[1] - trimRange[0]) / total) * 100;
-                return (
-                  <div
-                    className="absolute top-0 bottom-0 cursor-pointer"
-                    style={{
-                      // Shrink 14px inward on each side so the white thumb handles
-                      // (left + right) are never covered by this overlay
-                      left:  `calc(${leftPct}% + 14px)`,
-                      width: `calc(${widthPct}% - 28px)`,
-                      zIndex: 10,
-                    }}
-                    title="Click or drag to seek"
-                    onMouseDown={e => {
-                      e.stopPropagation();
-                      setIsDraggingRange(true);
-                      seekFromEvent(e);
-                    }}
-                    onMouseMove={e => {
-                      if (!isDraggingRange) return;
-                      e.stopPropagation();
-                      seekFromEvent(e);
-                    }}
-                    onMouseUp={() => setIsDraggingRange(false)}
-                    onMouseLeave={() => setIsDraggingRange(false)}
-                  />
-                );
-              })()}
 
               {/* Red playhead */}
               {metadata?.duration > 0 && (() => {

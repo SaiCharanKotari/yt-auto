@@ -32,6 +32,11 @@ router.get('/proxy', async (req: Request, res: Response) => {
 
     const response = await fetch(targetUrl, { headers: fetchHeaders });
 
+    if (!response.ok && response.status !== 206) {
+      console.error(`[Proxy Error] Upstream returned ${response.status} for ${targetUrl.substring(0, 50)}...`);
+      return res.status(response.status).json({ error: `Upstream returned ${response.status}` });
+    }
+
     res.status(response.status);
     ['content-type', 'content-length', 'content-range', 'accept-ranges'].forEach(h => {
       const val = response.headers.get(h);
@@ -48,6 +53,9 @@ router.get('/proxy', async (req: Request, res: Response) => {
     if (!res.headersSent) res.status(500).json({ error: err.message });
   }
 });
+
+
+
 
 // ─── /metadata ───────────────────────────────────────────────────────────────
 router.post('/metadata', async (req: Request, res: Response) => {
@@ -97,7 +105,9 @@ router.post('/download', async (req: Request, res: Response) => {
     
     if (format === 'mp4') {
       const height = quality.replace('p', '');
-      ytFormat = `bestvideo[height=${height}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height=${height}]+bestaudio/best[height<=${height}]`;
+      // No [ext=mp4] on video: YouTube serves 1080p+ as VP9/webm which is fine,
+      // ffmpeg will remux/encode to mp4 via --merge-output-format mp4.
+      ytFormat = `bestvideo[height=${height}]+bestaudio[ext=m4a]/bestvideo[height=${height}]+bestaudio/bestvideo[height<=${height}]+bestaudio[ext=m4a]/bestvideo[height<=${height}]+bestaudio/best[height<=${height}]/best`;
       audioFlags.push('--merge-output-format', 'mp4');
     } else {
       ytFormat = 'bestaudio/best';
@@ -130,7 +140,8 @@ router.post('/download', async (req: Request, res: Response) => {
       // Basic sanitize for safe filename on windows
       fileNameTemplate = customFileName.replace(/[<>:"/\\|?*]/g, '_');
     }
-    const outputPath = `${outputDir}\\${fileNameTemplate}.%(ext)s`;
+    const extName = format === 'mp4' ? 'mp4' : '%(ext)s';
+    const outputPath = `${outputDir}\\${fileNameTemplate}.${extName}`;
 
     // ── Handle direct media URLs (like FastDL) ─────────────────────────────────
     if (url.includes('media.fastdl.app') || url.includes('.mp4')) {
@@ -160,37 +171,72 @@ router.post('/download', async (req: Request, res: Response) => {
     }
 
     // ── Build a clean, copyable cmd.exe command for display ──────────────────
-    // Uses ^ to escape special chars that cmd.exe would misread
-    const displayCmd = [
-      `.\\yt-dlp.exe`,
-      `-f "${ytFormat}"`,
-      `--download-sections "*${trimStart}-${effectiveTrimEnd}"`,
-      ...audioFlags,
-      `-o "${outputPath}"`,
-      downloaderArgs,
-      `--restrict-filenames`,
-      `--no-playlist`,
-      `--js-runtimes node`,
-      `"${url}"`,
-    ].filter(Boolean).join(' ');
+    let displayCmd = '';
+    let execCmd = '';
+
+    if (format === 'mp4') {
+      // Create a temporary path for the full download to allow FFmpeg trimming later
+      const tempPath = `${outputDir}\\${fileNameTemplate}_full_temp.mp4`;
+      
+      const ytDlpCmd = [
+        `.\\yt-dlp.exe`,
+        `-f "${ytFormat}"`,
+        ...audioFlags,
+        `-o "${tempPath}"`,
+        downloaderArgs,
+        `--restrict-filenames`,
+        `--no-playlist`,
+        `--js-runtimes node`,
+        `--extractor-args "youtube:player_client=default,web_embedded"`,
+        `"${url}"`,
+      ].filter(Boolean).join(' ');
+
+      // ffmpeg command to trim with proper timestamp handling (re-encode audio to fix AAC gaps)
+      const trimCmd = `ffmpeg -i "${tempPath}" -ss ${trimStart} -to ${effectiveTrimEnd} -c:v copy -c:a aac -async 1 -y "${outputPath}"`;
+      const cleanupCmd = `del "${tempPath}"`;
+
+      // Use newlines for displayCmd so it can be pasted into PowerShell or CMD easily
+      displayCmd = `${ytDlpCmd}\n${trimCmd}\n${cleanupCmd}`;
+      
+      // For execCmd, use the full path to YTDLP_BIN and && for single-line execution in cmd.exe
+      const ytDlpExec = ytDlpCmd.replace('.\\yt-dlp.exe', `"${YTDLP_BIN}"`);
+      execCmd = `${ytDlpExec} && ${trimCmd} && ${cleanupCmd}`;
+    } else {
+      // Audio-only or other formats, keep using --download-sections
+      displayCmd = [
+        `.\\yt-dlp.exe`,
+        `-f "${ytFormat}"`,
+        `--download-sections "*${trimStart}-${effectiveTrimEnd}"`,
+        ...audioFlags,
+        `-o "${outputPath}"`,
+        downloaderArgs,
+        `--restrict-filenames`,
+        `--no-playlist`,
+        `--js-runtimes node`,
+        `--extractor-args "youtube:player_client=default,web_embedded"`,
+        `"${url}"`,
+      ].filter(Boolean).join(' ');
+
+      execCmd = [
+        `"${YTDLP_BIN}"`,
+        `-f "${ytFormat}"`,
+        `--download-sections "*${trimStart}-${effectiveTrimEnd}"`,
+        ...audioFlags,
+        `-o "${outputPath}"`,
+        downloaderArgs,
+        `--restrict-filenames`,
+        `--no-playlist`,
+        `--js-runtimes node`,
+        `--extractor-args "youtube:player_client=default,web_embedded"`,
+        `"${url}"`,
+      ].filter(Boolean).join(' ');
+    }
     
     console.log(`[Download] Opening cmd with command: \n${displayCmd}`);
 
     // ── Open a new cmd.exe window in the backend dir and run the command ──────
     // cmd /k keeps the window open after the command finishes so user can read output
     // We use the full YTDLP_BIN path for execution so .\yt-dlp.exe resolves correctly
-    const execCmd = [
-      `"${YTDLP_BIN}"`,
-      `-f "${ytFormat}"`,
-      `--download-sections "*${trimStart}-${effectiveTrimEnd}"`,
-      ...audioFlags,
-      `-o "${outputPath}"`,
-      downloaderArgs,
-      `--restrict-filenames`,
-      `--no-playlist`,
-      `--js-runtimes node`,
-      `"${url}"`,
-    ].filter(Boolean).join(' ');
     const escapedCmd = execCmd.replace(/"/g, '\\"');
     exec(`start cmd /c "${escapedCmd}"`);
 
