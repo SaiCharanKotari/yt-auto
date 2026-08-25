@@ -44,8 +44,8 @@ app.use('/api/video', videoRoutes);
 // app.use('/api/accounts', accountRoutes); // disabled — requires MongoDB
 // app.use('/api/settings', settingsRoutes); // disabled — requires MongoDB
 
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok' });
+app.get(['/health', '/api/health'], (req, res) => {
+  res.json({ status: 'ok', engine: 'yt-dlp + FFmpeg Ready' });
 });
 
 httpServer.listen(port, () => {

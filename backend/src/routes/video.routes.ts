@@ -3,6 +3,7 @@ import { YtDlpService } from '../services/yt-dlp.service.js';
 import { FFmpegService, scheduleCleanup } from '../services/ffmpeg.service.js';
 import { AIService } from '../services/ai.service.js';
 import { SocketService } from '../services/socket.service.js';
+import { generatePowerShellWorkflow } from '../services/command-generator.service.js';
 import crypto from 'crypto';
 import path from 'path';
 import fs from 'fs';
@@ -95,7 +96,7 @@ router.post('/metadata', async (req: Request, res: Response) => {
 
 // ─── /download (Direct Terminal Execution) ──────────────────────────────────
 router.post('/download', async (req: Request, res: Response) => {
-  const { url, format = 'mp4', quality = '720p', trimStart = 0, trimEnd, audioBitrate = '192k', aspectRatio, customFileName } = req.body;
+  const { url, format = 'mp4', quality = '720p', trimStart = 0, trimEnd, audioBitrate = '192k', aspectRatio, fitMode = 'pad', customFileName } = req.body;
 
   if (!url) return res.status(400).json({ error: 'url is required' });
 
@@ -114,9 +115,8 @@ router.post('/download', async (req: Request, res: Response) => {
       audioFlags.push('--extract-audio', '--audio-format', format, '--audio-quality', audioBitrate);
     }
 
-    let downloaderArgs = '';
-    if (format === 'mp4' && aspectRatio && aspectRatio !== 'original') {
-      let vfFilter = '';
+    let vfFilter = '';
+    if (format === 'mp4' && aspectRatio && aspectRatio !== 'original' && aspectRatio !== '16:9') {
       const isPad = req.body.fitMode === 'pad';
 
       if (aspectRatio === '9:16') {
@@ -125,10 +125,6 @@ router.post('/download', async (req: Request, res: Response) => {
         vfFilter = isPad ? 'pad=ceil(max(iw\\,ih)/2)*2:ceil(max(ih\\,iw)/2)*2:(ow-iw)/2:(oh-ih)/2:color=black' : 'crop=ih:ih';
       } else if (aspectRatio === '4:5') {
         vfFilter = isPad ? 'pad=ceil(max(iw\\,ih*4/5)/2)*2:ceil(max(ih\\,iw*5/4)/2)*2:(ow-iw)/2:(oh-ih)/2:color=black' : 'crop=ih*4/5:ih';
-      }
-      
-      if (vfFilter) {
-        downloaderArgs = `--downloader-args "ffmpeg:-vf ${vfFilter} -c:v libx264 -preset fast"`;
       }
     }
 
@@ -170,80 +166,38 @@ router.post('/download', async (req: Request, res: Response) => {
       });
     }
 
-    // ── Build a clean, copyable cmd.exe command for display ──────────────────
-    let displayCmd = '';
-    let execCmd = '';
+    // ── Generate Pure PowerShell Workflow ────────────────────────────────────
+    const workflow = generatePowerShellWorkflow({
+      url,
+      format,
+      quality,
+      audioQuality: req.body.audioQuality || req.body.audioBitrate || '0',
+      trimStart,
+      trimEnd: trimEnd !== undefined ? Number(trimEnd) : undefined,
+      aspectRatio,
+      fitMode,
+      customFileName,
+    });
 
-    if (format === 'mp4') {
-      // Create a temporary path for the full download to allow FFmpeg trimming later
-      const tempPath = `${outputDir}\\${fileNameTemplate}_full_temp.mp4`;
-      
-      const ytDlpCmd = [
-        `.\\yt-dlp.exe`,
-        `-f "${ytFormat}"`,
-        ...audioFlags,
-        `-o "${tempPath}"`,
-        downloaderArgs,
-        `--restrict-filenames`,
-        `--no-playlist`,
-        `--js-runtimes node`,
-        `--extractor-args "youtube:player_client=default,web_embedded"`,
-        `"${url}"`,
-      ].filter(Boolean).join(' ');
+    console.log(`[Download] Opening PowerShell workflow:\n${workflow.powerShellScript}`);
 
-      // ffmpeg command to trim with proper timestamp handling (re-encode audio to fix AAC gaps)
-      const trimCmd = `ffmpeg -i "${tempPath}" -ss ${trimStart} -to ${effectiveTrimEnd} -c:v copy -c:a aac -async 1 -y "${outputPath}"`;
-      const cleanupCmd = `del "${tempPath}"`;
-
-      // Use newlines for displayCmd so it can be pasted into PowerShell or CMD easily
-      displayCmd = `${ytDlpCmd}\n${trimCmd}\n${cleanupCmd}`;
-      
-      // For execCmd, use the full path to YTDLP_BIN and && for single-line execution in cmd.exe
-      const ytDlpExec = ytDlpCmd.replace('.\\yt-dlp.exe', `"${YTDLP_BIN}"`);
-      execCmd = `${ytDlpExec} && ${trimCmd} && ${cleanupCmd}`;
-    } else {
-      // Audio-only or other formats, keep using --download-sections
-      displayCmd = [
-        `.\\yt-dlp.exe`,
-        `-f "${ytFormat}"`,
-        `--download-sections "*${trimStart}-${effectiveTrimEnd}"`,
-        ...audioFlags,
-        `-o "${outputPath}"`,
-        downloaderArgs,
-        `--restrict-filenames`,
-        `--no-playlist`,
-        `--js-runtimes node`,
-        `--extractor-args "youtube:player_client=default,web_embedded"`,
-        `"${url}"`,
-      ].filter(Boolean).join(' ');
-
-      execCmd = [
-        `"${YTDLP_BIN}"`,
-        `-f "${ytFormat}"`,
-        `--download-sections "*${trimStart}-${effectiveTrimEnd}"`,
-        ...audioFlags,
-        `-o "${outputPath}"`,
-        downloaderArgs,
-        `--restrict-filenames`,
-        `--no-playlist`,
-        `--js-runtimes node`,
-        `--extractor-args "youtube:player_client=default,web_embedded"`,
-        `"${url}"`,
-      ].filter(Boolean).join(' ');
-    }
-    
-    console.log(`[Download] Opening cmd with command: \n${displayCmd}`);
-
-    // ── Open a new cmd.exe window in the backend dir and run the command ──────
-    // cmd /k keeps the window open after the command finishes so user can read output
-    // We use the full YTDLP_BIN path for execution so .\yt-dlp.exe resolves correctly
-    const escapedCmd = execCmd.replace(/"/g, '\\"');
-    exec(`start cmd /c "${escapedCmd}"`);
+    // Write the script to a .ps1 temp file and run it via `powershell -File`.
+    // CRITICAL: Do NOT inline the command through cmd.exe — the `<` and `>` in
+    // yt-dlp's format string (e.g. bestvideo[height<=1080]) get interpreted as
+    // IO redirection operators by cmd.exe, silently mangling the quality selector
+    // and causing yt-dlp to fall back to whatever it can find (e.g. 360p).
+    const tempScriptPath = path.join(
+      process.env.TEMP || 'C:\\Windows\\Temp',
+      `clipflow_${Date.now()}.ps1`
+    );
+    const fullScript = `Set-Location "$env:USERPROFILE\\Documents"\n${workflow.powerShellScript}`;
+    fs.writeFileSync(tempScriptPath, fullScript, 'utf8');
+    exec(`start powershell -NoExit -ExecutionPolicy Bypass -File "${tempScriptPath}"`);
 
     res.json({ 
       success: true, 
-      message: 'A cmd terminal just opened and is running the download to your Downloads folder!',
-      command: displayCmd,
+      message: 'A PowerShell terminal just opened and is running the download to your Downloads folder!',
+      command: workflow.powerShellScript,
     });
   } catch (err: any) {
     console.error('[Download] Error:', err.message);

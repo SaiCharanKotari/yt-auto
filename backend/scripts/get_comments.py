@@ -1,6 +1,12 @@
 import sys
 import json
-from youtube_comment_downloader import YoutubeCommentDownloader
+
+try:
+    from youtube_comment_downloader import YoutubeCommentDownloader
+except ImportError:
+    # If the python package is not installed, output empty comments array cleanly
+    print(json.dumps([]))
+    sys.exit(0)
 
 def get_comments(url, limit=100):
     try:

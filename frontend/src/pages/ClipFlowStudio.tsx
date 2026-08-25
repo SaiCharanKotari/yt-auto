@@ -2,30 +2,39 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
-  Scissors, Sparkles, Play, Pause, Volume2, VolumeX, Download, 
-  Copy, Check, AlertCircle, RefreshCw, Film, Instagram, Youtube, 
-  Clock, Zap, CheckCircle2, ChevronRight, Share2, Layers, 
-  Sliders, ArrowUpRight, ShieldCheck, HelpCircle, History,
-  Maximize2, ArrowLeft, Terminal, FileVideo, Sparkle, ExternalLink
+  Scissors, Sparkles, Download, 
+  Copy, Check, AlertCircle, RefreshCw, Film, 
+  Clock, Zap, CheckCircle2, ChevronRight, Layers, 
+  Sliders, ShieldCheck, History,
+  ArrowLeft, Terminal, FileVideo
 } from 'lucide-react';
 import * as Slider from '@radix-ui/react-slider';
 import YouTube, { type YouTubePlayer } from 'react-youtube';
+
+// ─── Custom Icons ────────────────────────────────────────────────────────────
+function YoutubeIcon({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor" className={className}>
+      <path d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z"/>
+    </svg>
+  );
+}
+
+function InstagramIcon({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
+      <rect width="20" height="20" x="2" y="2" rx="5" ry="5"/>
+      <path d="M16 11.37A4 4 0 1 1 12.63 8 4 4 0 0 1 16 11.37z"/>
+      <line x1="17.5" x2="17.51" y1="6.5" y2="6.5"/>
+    </svg>
+  );
+}
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 function extractYouTubeId(url: string | null): string | null {
   if (!url) return null;
   const match = url.match(/^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|&v=|shorts\/)([^#&?]*).*/);
   return (match && match[2].length === 11) ? match[2] : null;
-}
-
-function detectPlatform(url: string): 'youtube' | 'instagram' | 'twitch' | 'tiktok' | 'direct' | 'other' {
-  if (!url) return 'other';
-  if (url.includes('youtube.com') || url.includes('youtu.be')) return 'youtube';
-  if (url.includes('instagram.com')) return 'instagram';
-  if (url.includes('twitch.tv')) return 'twitch';
-  if (url.includes('tiktok.com')) return 'tiktok';
-  if (url.endsWith('.mp4') || url.includes('media.fastdl')) return 'direct';
-  return 'other';
 }
 
 function formatTime(seconds: number): string {
@@ -80,19 +89,16 @@ interface ClipHistoryItem {
 
 const SAMPLE_VIDEOS = [
   {
-    name: 'Apple Vision Pro Review (MKBHD)',
-    url: 'https://www.youtube.com/watch?v=dtp6bBmJenc',
-    platform: 'youtube'
+    name: 'Me at the zoo (Classic 4K)',
+    url: 'https://www.youtube.com/watch?v=jNQXAC9IVRw',
   },
   {
-    name: 'Veritasium — The Illusion of Speed',
-    url: 'https://www.youtube.com/watch?v=42quXat9z5I',
-    platform: 'youtube'
+    name: 'Rick Astley — Never Gonna Give You Up',
+    url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
   },
   {
-    name: 'Huberman Lab Podcast Highlight',
-    url: 'https://www.youtube.com/watch?v=swzp_gZk0kE',
-    platform: 'youtube'
+    name: 'Big Buck Bunny (Animation HD)',
+    url: 'https://www.youtube.com/watch?v=aqz-KE-bpKQ',
   }
 ];
 
@@ -116,7 +122,6 @@ export default function ClipFlowStudio() {
   const youtubePlayerRef = useRef<YouTubePlayer | null>(null);
   const sliderWrapRef = useRef<HTMLDivElement>(null);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [isMuted, setIsMuted] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [trimRange, setTrimRange] = useState<[number, number]>([0, 60]);
 
@@ -132,7 +137,6 @@ export default function ClipFlowStudio() {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [aiHighlights, setAiHighlights] = useState<AIHighlight[]>([]);
   const [aiCustomPrompt, setAiCustomPrompt] = useState('');
-  const [aiAnalysisSummary, setAiAnalysisSummary] = useState('');
 
   // Download & Execution State
   const [isDownloading, setIsDownloading] = useState(false);
@@ -360,7 +364,7 @@ export default function ClipFlowStudio() {
           tag: m.tag || 'Viral Hook',
         })));
       } else {
-        // Fallback intelligent highlights if backend returned generic format
+        // Fallback intelligent highlights
         const total = metadata?.duration || 180;
         setAiHighlights([
           {
@@ -389,10 +393,8 @@ export default function ClipFlowStudio() {
           }
         ]);
       }
-      setAiAnalysisSummary(data.summary || data.overview || 'AI successfully analyzed transcription and detected viral segments.');
     } catch (e: any) {
       console.error('AI scan error:', e);
-      // Fallback highlights so user always gets a 10x interactive experience
       const total = metadata?.duration || 180;
       setAiHighlights([
         {
@@ -431,7 +433,7 @@ export default function ClipFlowStudio() {
       youtubePlayerRef.current.seekTo(hl.start, true);
     }
     if (aspectRatio === '16:9') {
-      setAspectRatio('9:16'); // Auto switch to Shorts format for viral clips!
+      setAspectRatio('9:16');
     }
   };
 
@@ -608,7 +610,7 @@ export default function ClipFlowStudio() {
               <div className="absolute -inset-0.5 bg-gradient-to-r from-purple-500 via-pink-500 to-indigo-500 rounded-2xl blur opacity-30 group-hover:opacity-60 transition duration-300" />
               <div className="relative flex items-center bg-[#0d1424] border border-white/15 rounded-2xl p-2 shadow-2xl">
                 <div className="pl-3 pr-2 text-gray-400">
-                  <Youtube className="w-6 h-6 text-red-400" />
+                  <YoutubeIcon className="w-6 h-6 text-red-500" />
                 </div>
                 <input
                   type="url"
@@ -1286,7 +1288,7 @@ export default function ClipFlowStudio() {
             <div className="glass-panel rounded-2xl p-6 max-w-3xl mx-auto border-pink-500/20 bg-gradient-to-br from-pink-500/5 via-purple-500/5 to-transparent">
               <div className="flex items-center gap-3 mb-3">
                 <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-yellow-500 via-pink-500 to-purple-500 flex items-center justify-center shadow-lg shadow-pink-500/20">
-                  <Instagram className="w-5 h-5 text-white" />
+                  <InstagramIcon className="w-5 h-5 text-white" />
                 </div>
                 <div>
                   <h3 className="font-bold text-white text-lg">Instant Instagram Reel Grabber</h3>

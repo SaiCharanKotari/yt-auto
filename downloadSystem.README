@@ -1,0 +1,242 @@
+# ClipFlow Download System Documentation
+
+
+
+This document explains the unified download command system implemented for ClipFlow.
+
+---
+
+## 1. Files Modified / Involved
+
+1. **`backend/src/services/command-generator.service.ts`**
+   - Implements `generatePowerShellWorkflow(options)`.
+   - Generates exact `yt-dlp` commands for video clips, full videos, and MP3 audio clips with bitrate selection.
+   - Formats start/end timestamps from clip editor into `*HH:MM:SS-HH:MM:SS`.
+   - Selects the exact quality fallback chain `-f "bestvideo[height<=H]+bestaudio/best[height<=H]"`.
+   - Emits `--force-keyframes-at-cuts` and `--js-runtimes node`.
+
+2. **`backend/src/routes/video.routes.ts`**
+   - Receives `/download` POST requests with `url`, `format`, `quality`, `audioQuality` / `audioBitrate`, `trimStart`, `trimEnd`, and `customFileName`.
+   - Writes the exact workflow command to a temporary `.ps1` file (`clipflow_<timestamp>.ps1`).
+   - Executes via `powershell -ExecutionPolicy Bypass -File <script.ps1>` to prevent Windows `cmd.exe` from mangling format operators `<` and `>`.
+
+3. **`frontend/src/pages/ClipFlowEditor.tsx`**
+   - Sends exact start/end seconds, selected video quality (e.g. 1080p, 720p, 4K), audio format (MP4 / MP3 / WAV), and audio bitrates (`0` for best VBR, `320k`, `256k`, `192k`, `128k`).
+   - Provides bitrate toggle buttons when MP3 is selected.
+
+4. **`backend/test-commands.mjs`**
+   - Automated test suite verifying all combinations of video qualities, MP3 bitrates, time sections, full video downloads, and filename sanitization.
+
+---
+
+## 2. Command Specifications Implemented
+
+### A. Video Clip Download (MP4 with specific resolution)
+```powershell
+.\yt-dlp.exe `
+  --js-runtimes node `
+  --download-sections "*00:01:20-00:01:45" `
+  -f "bestvideo[height<=1080]+bestaudio/best[height<=1080]" `
+  --merge-output-format mp4 `
+  --force-keyframes-at-cuts `
+  --no-playlist `
+  -o "$env:USERPROFILE\Downloads\filename_clip.mp4" `
+  "https://youtu.be/4cf5OlJ7bzw"
+```
+
+**Quality mapping implemented:**
+- **4K / 2160p**: `-f "bestvideo[height<=2160]+bestaudio/best[height<=2160]"`
+- **1440p / 2K**: `-f "bestvideo[height<=1440]+bestaudio/best[height<=1440]"`
+- **1080p**: `-f "bestvideo[height<=1080]+bestaudio/best[height<=1080]"`
+- **720p**: `-f "bestvideo[height<=720]+bestaudio/best[height<=720]"`
+- **480p**: `-f "bestvideo[height<=480]+bestaudio/best[height<=480]"`
+- **360p**: `-f "bestvideo[height<=360]+bestaudio/best[height<=360]"`
+- **240p**: `-f "bestvideo[height<=240]+bestaudio/best[height<=240]"`
+- **Best**: `-f "bestvideo+bestaudio/best"`
+
+---
+
+### B. MP3 Audio Clip (with exact start/end trim)
+```powershell
+.\yt-dlp.exe `
+  --js-runtimes node `
+  --download-sections "*00:01:20-00:01:45" `
+  -x `
+  --audio-format mp3 `
+  --audio-quality 0 `
+  --force-keyframes-at-cuts `
+  --no-playlist `
+  -o "$env:USERPROFILE\Downloads\filename_clip.mp3" `
+  "https://youtu.be/4cf5OlJ7bzw"
+```
+
+**Audio quality options supported:**
+- `--audio-quality 0` (Best VBR conversion quality)
+- `--audio-quality 320K` (320 kbps)
+- `--audio-quality 256K` (256 kbps)
+- `--audio-quality 192K` (192 kbps)
+- `--audio-quality 128K` (128 kbps)
+
+---
+
+### C. Full Video / Full MP3 (When no trim range is specified)
+Omits `--download-sections` and `--force-keyframes-at-cuts`, downloading the entire stream directly in one pass.
+
+---
+
+## 3. Key Enhancements & Fixes Applied
+
+1. **`--force-keyframes-at-cuts` Added**:
+   Ensures video and audio cuts begin on an exact I-frame boundary for clean start times without black frames or audio sync delay.
+
+2. **`--js-runtimes node` Added**:
+   Uses the local Node.js environment to evaluate YouTube player Javascript challenges without throttling.
+
+3. **No Mangling via `cmd.exe`**:
+   PowerShell commands containing `<` and `>` in `-f "bestvideo[height<=1080]..."` are executed cleanly from a standalone script file so Windows Command Prompt does not treat them as redirection operators.
+
+4. **Output Destination**:
+   Saved to `$env:USERPROFILE\Downloads\<customName_or_title>_clip.<ext>`. Invalid Windows filename characters (`<`, `>`, `:`, `"`, `/`, `\`, `|`, `?`, `*`) are automatically sanitized.
+
+
+   -h, --help                      Print this help text and exit
+--version                       Print program version and exit
+-U, --update                    Update this program to the latest version
+--no-update                     Do not check for updates (default)
+--update-to [CHANNEL]@[TAG]     Upgrade/downgrade to a specific version.
+                                CHANNEL can be a repository as well. CHANNEL
+                                and TAG default to "stable" and "latest"
+                                respectively if omitted; See "UPDATE" for
+                                details. Supported channels: stable,
+                                nightly, master
+-i, --ignore-errors             Ignore download and postprocessing errors.
+                                The download will be considered successful
+                                even if the postprocessing fails
+--no-abort-on-error             Continue with next video on download errors;
+                                e.g. to skip unavailable videos in a
+                                playlist (default)
+--abort-on-error                Abort downloading of further videos if an
+                                error occurs (Alias: --no-ignore-errors)
+--list-extractors               List all supported extractors and exit
+--extractor-descriptions        Output descriptions of all supported
+                                extractors and exit
+--use-extractors NAMES          Extractor names to use separated by commas.
+                                You can also use regexes, "all", "default"
+                                and "end" (end URL matching); e.g. --ies
+                                "holodex.*,end,youtube". Prefix the name
+                                with a "-" to exclude it, e.g. --ies
+                                default,-generic. Use --list-extractors for
+                                a list of extractor names. (Alias: --ies)
+--default-search PREFIX         Use this prefix for unqualified URLs. E.g.
+                                "gvsearch2:python" downloads two videos from
+                                google videos for the search term "python".
+                                Use the value "auto" to let yt-dlp guess
+                                ("auto_warning" to emit a warning when
+                                guessing). "error" just throws an error. The
+                                default value "fixup_error" repairs broken
+                                URLs, but emits an error if this is not
+                                possible instead of searching
+--ignore-config                 Don't load any more configuration files
+                                except those given to --config-locations.
+                                For backward compatibility, if this option
+                                is found inside the system configuration
+                                file, the user configuration is not loaded.
+                                (Alias: --no-config)
+--no-config-locations           Do not load any custom configuration files
+                                (default). When given inside a configuration
+                                file, ignore all previous --config-locations
+                                defined in the current file
+--config-locations PATH         Location of the main configuration file;
+                                either the path to the config or its
+                                containing directory ("-" for stdin). Can be
+                                used multiple times and inside other
+                                configuration files
+--plugin-dirs DIR               Path to an additional directory to search
+                                for plugins. This option can be used
+                                multiple times to add multiple directories.
+                                Use "default" to search the default plugin
+                                directories (default)
+--no-plugin-dirs                Clear plugin directories to search,
+                                including defaults and those provided by
+                                previous --plugin-dirs
+--js-runtimes RUNTIME[:PATH]    Additional JavaScript runtime to enable,
+                                with an optional location for the runtime
+                                (either the path to the binary or its
+                                containing directory). This option can be
+                                used multiple times to enable multiple
+                                runtimes. Supported runtimes are (in order
+                                of priority, from highest to lowest): deno,
+                                node, quickjs, bun. Only "deno" is enabled
+                                by default. The highest priority runtime
+                                that is both enabled and available will be
+                                used. In order to use a lower priority
+                                runtime when "deno" is available, --no-js-
+                                runtimes needs to be passed before enabling
+                                other runtimes
+--no-js-runtimes                Clear JavaScript runtimes to enable,
+                                including defaults and those provided by
+                                previous --js-runtimes
+--remote-components COMPONENT   Remote components to allow yt-dlp to fetch
+                                when required. This option is currently not
+                                needed if you are using an official
+                                executable or have the requisite version of
+                                the yt-dlp-ejs package installed. You can
+                                use this option multiple times to allow
+                                multiple components. Supported values:
+                                ejs:npm (external JavaScript components from
+                                npm), ejs:github (external JavaScript
+                                components from yt-dlp-ejs GitHub). By
+                                default, no remote components are allowed
+--no-remote-components          Disallow fetching of all remote components,
+                                including any previously allowed by
+                                --remote-components or defaults.
+--flat-playlist                 Do not extract a playlist's URL result
+                                entries; some entry metadata may be missing
+                                and downloading may be bypassed
+--no-flat-playlist              Fully extract the videos of a playlist
+                                (default)
+--live-from-start               Download livestreams from the start.
+                                Currently experimental and only supported
+                                for YouTube, Twitch, TVer, and mellow-fan
+--no-live-from-start            Download livestreams from the current time
+                                (default)
+--wait-for-video MIN[-MAX]      Wait for scheduled streams to become
+                                available. Pass the minimum number of
+                                seconds (or range) to wait between retries
+--no-wait-for-video             Do not wait for scheduled streams (default)
+--mark-watched                  Mark videos watched (even with --simulate)
+--no-mark-watched               Do not mark videos watched (default)
+--color [STREAM:]POLICY         Whether to emit color codes in output,
+                                optionally prefixed by the STREAM (stdout or
+                                stderr) to apply the setting to. Can be one
+                                of "always", "auto" (default), "never", or
+                                "no_color" (use non color terminal
+                                sequences). Use "auto-tty" or "no_color-tty"
+                                to decide based on terminal support only.
+                                Can be used multiple times
+--compat-options OPTS           Options that can help keep compatibility
+                                with youtube-dl or youtube-dlc
+                                configurations by reverting some of the
+                                changes made in yt-dlp. See "Differences in
+                                default behavior" for details
+--alias ALIASES OPTIONS         Create aliases for an option string. Unless
+                                an alias starts with a dash "-", it is
+                                prefixed with "--". Arguments are parsed
+                                according to the Python string formatting
+                                mini-language. E.g. --alias get-audio,-X "-S
+                                aext:{0},abr -x --audio-format {0}" creates
+                                options "--get-audio" and "-X" that takes an
+                                argument (ARG0) and expands to "-S
+                                aext:ARG0,abr -x --audio-format ARG0". All
+                                defined aliases are listed in the --help
+                                output. Alias options can trigger more
+                                aliases; so be careful to avoid defining
+                                recursive options. As a safety measure, each
+                                alias may be triggered a maximum of 100
+                                times. This option can be used multiple times
+-t, --preset-alias PRESET       Applies a predefined set of options. e.g.
+                                --preset-alias mp3. The following presets
+                                are available: mp3, aac, mp4, mkv, sleep.
+                                See the "Preset Aliases" section at the end
+                                for more info. This option can be used
+                                multiple times

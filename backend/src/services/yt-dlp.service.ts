@@ -12,13 +12,13 @@ export class YtDlpService {
   static async getVideoMetadata(url: string) {
     try {
       const { stdout } = await execAsync(
-        `"${YTDLP_BIN}" --dump-json --no-warnings --no-check-certificate --prefer-free-formats --js-runtimes node "${url}"`,
+        `"${YTDLP_BIN}" --dump-json --no-warnings --no-check-certificate --prefer-free-formats --js-runtimes node --extractor-args "youtube:player_client=default,web_embedded" "${url}"`,
         { maxBuffer: 1024 * 1024 * 50 }
       );
       return JSON.parse(stdout);
-    } catch (error) {
-      console.error('Error fetching metadata:', error);
-      throw new Error('Failed to fetch video metadata');
+    } catch (error: any) {
+      console.error('Error fetching metadata:', error?.message || error);
+      throw new Error(error?.message || 'Failed to fetch video metadata');
     }
   }
 
