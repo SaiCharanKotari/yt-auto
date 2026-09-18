@@ -1,7 +1,7 @@
 import { useEffect, useState, useRef } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Download, Sparkles, Play, Pause, PlaySquare, Volume2, VolumeX, CheckCircle, AlertCircle, Loader2, Copy, ArrowLeft, Image } from 'lucide-react';
+import { Download, Sparkles, Play, Pause, PlaySquare, Volume2, VolumeX, CheckCircle, AlertCircle, Loader2, Copy, ArrowLeft, Image, Monitor, X, RefreshCw, Check, RotateCcw, RotateCw } from 'lucide-react';
 import * as Slider from '@radix-ui/react-slider';
 import YouTube, { type YouTubePlayer } from 'react-youtube';
 
@@ -35,10 +35,22 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-/** Estimate size from tbr (total bitrate, kbps) × trim duration */
-function estimateSize(tbr: number | undefined, trimDurationSec: number): string {
-  if (!tbr || tbr <= 0 || trimDurationSec <= 0) return '';
-  const bytes = (tbr * 1000 / 8) * trimDurationSec;
+/** Estimate size from realistic resolution bitrate & trim duration */
+function estimateSize(tbr: number | undefined, trimDurationSec: number, height?: number): string {
+  if (trimDurationSec <= 0) return '';
+  const h = height || 1080;
+  let baseKbps = 3800; // 1080p
+  if (h >= 2160) baseKbps = 20000;
+  else if (h >= 1440) baseKbps = 10000;
+  else if (h >= 1080) baseKbps = 3800;
+  else if (h >= 720) baseKbps = 2200;
+  else if (h >= 480) baseKbps = 1000;
+  else if (h >= 360) baseKbps = 550;
+  else if (h >= 240) baseKbps = 300;
+  else baseKbps = 150;
+
+  const effectiveKbps = (tbr && tbr > baseKbps) ? (tbr + 160) : baseKbps;
+  const bytes = (effectiveKbps * 1000 / 8) * trimDurationSec;
   return formatBytes(bytes);
 }
 
@@ -112,6 +124,8 @@ export default function VideoPage() {
   // Download selections
   const [downloadQuality, setDownloadQuality] = useState('');
   const [downloadFormat,  setDownloadFormat]  = useState('mp4');
+  const [subtitleFormat,  setSubtitleFormat]  = useState<'srt' | 'vtt' | 'txt'>('srt');
+  const [subtitleLang,    setSubtitleLang]    = useState<string>('en');
   const [customFileName,  setCustomFileName]  = useState('');
 
   // Download progress
@@ -120,12 +134,8 @@ export default function VideoPage() {
   const [dlStatus,        setDlStatus]        = useState<'idle' | 'downloading' | 'processing' | 'done' | 'error'>('idle');
   const [dlError,         setDlError]         = useState('');
   const [dlMessage,       setDlMessage]       = useState('');
+  const [showAppDownloadModal, setShowAppDownloadModal] = useState(false);
   const [generatedCommand, setGeneratedCommand] = useState('');
-
-  // AI State
-  const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const [aiResult, setAiResult] = useState<any>(null);
-  const [aiCustomPrompt, setAiCustomPrompt] = useState('');
 
   // Trim
   const [trimRange, setTrimRange] = useState([0, 60]);
@@ -200,14 +210,83 @@ export default function VideoPage() {
   // ── Fetch metadata ──────────────────────────────────────────────────────────
   useEffect(() => {
     if (!url) return;
-    fetch('http://localhost:3001/api/video/metadata', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url }),
-    })
-      .then(r => r.json())
-      .then(data => {
-        if (data.error) throw new Error(data.error);
+
+    const fetchMeta = async () => {
+      let data: any = null;
+      console.log('%c[ClipFlow VideoPage 📡 METADATA REQUEST]', 'color: #38bdf8; font-weight: bold;', { url });
+
+      const endpoints = [
+        'http://127.0.0.1:18942/metadata',
+        'http://localhost:18942/metadata',
+        'http://localhost:3001/api/video/metadata',
+      ];
+
+      for (const endpoint of endpoints) {
+        try {
+          console.log(`[ClipFlow VideoPage 📡] Querying metadata from: ${endpoint}`);
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 9000);
+          const res = await fetch(endpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url }),
+            signal: controller.signal,
+          });
+          clearTimeout(timeoutId);
+          if (res.ok) {
+            const json = await res.json();
+            if (json && !json.error && (json.title || json.id)) {
+              data = json;
+              console.log('%c[ClipFlow VideoPage 📥 METADATA SUCCESS]', 'color: #22c55e; font-weight: bold;', {
+                endpoint,
+                title: json.title,
+                duration: json.duration_string || json.duration,
+                formatsCount: json.formats?.length || 0,
+              });
+              break;
+            }
+          }
+        } catch (e: any) {
+          console.warn(`[ClipFlow VideoPage ⚠️] Endpoint ${endpoint} unreachable: ${e.message}`);
+        }
+      }
+
+      if (!data) {
+        const ytId = extractYouTubeId(url);
+        if (ytId) {
+          try {
+            const oembedRes = await fetch(`https://noembed.com/embed?url=https://www.youtube.com/watch?v=${ytId}`);
+            if (oembedRes.ok) {
+              const oembed = await oembedRes.json();
+              data = {
+                id: ytId,
+                title: oembed.title || 'YouTube Video',
+                thumbnail: `https://img.youtube.com/vi/${ytId}/maxresdefault.jpg`,
+                uploader: oembed.author_name || 'YouTube Creator',
+                duration: 0,
+                duration_string: '00:00',
+                formats: [],
+              };
+            }
+          } catch (e) { }
+
+          if (!data) {
+            data = {
+              id: ytId,
+              title: 'YouTube Video',
+              thumbnail: `https://img.youtube.com/vi/${ytId}/hqdefault.jpg`,
+              uploader: 'YouTube Creator',
+              duration: 0,
+              duration_string: '00:00',
+              formats: [],
+            };
+          }
+        }
+      }
+
+      if (!data) return;
+
+      try {
         setMetadata(data);
         setCustomFileName(data.title || 'video');
 
@@ -229,16 +308,15 @@ export default function VideoPage() {
           }
         });
 
-        // Sort descending (highest quality first)
-        const sortedHeights = Array.from(heightSet).sort((a, b) => b - a);
+        const allStandardHeights = [2160, 1440, 1080, 720, 480, 360, 240];
 
-        const opts: QualityOption[] = sortedHeights.map(targetH => {
+        const opts: QualityOption[] = allStandardHeights.map(targetH => {
           // Best candidate for size/tbr display (prefer muxed → highest tbr)
           const candidates = (data.formats || []).filter((f: any) => {
             if (!f.vcodec || f.vcodec === 'none') return false;
             const res = f.resolution || '';
             const match = res.match(/\d+x(\d+)/);
-            return match && parseInt(match[1]) === targetH;
+            return (match && parseInt(match[1]) === targetH) || f.height === targetH;
           });
           const muxedCand = candidates.filter((f: any) => f.acodec && f.acodec !== 'none');
           const best = (muxedCand.length > 0 ? muxedCand : candidates)
@@ -247,7 +325,7 @@ export default function VideoPage() {
           return {
             label: `${targetH}p`,
             height: targetH,
-            format_id: best?.format_id || '',
+            format_id: best?.format_id || 'best',
             tbr: best?.tbr,
             filesize: best?.filesize,
             url: best?.url,
@@ -262,11 +340,13 @@ export default function VideoPage() {
         const duration = Math.floor(data.duration || 0);
         setTrimRange([0, duration]);
         setIsLoading(false);
-      })
-      .catch(err => {
+      } catch (err: any) {
         setError(err.message || 'Failed to fetch metadata');
         setIsLoading(false);
-      });
+      }
+    };
+
+    fetchMeta();
   }, [url]);
 
   // ── Thumbnail Download handler ─────────────────────────────────────────────
@@ -282,46 +362,108 @@ export default function VideoPage() {
   };
 
   // ── Download handler ───────────────────────────────────────────────────────
-  const handleDownload = async () => {
-    if (!url || isDownloading) return;
-
+  const handleDownload = async (forceServerFallback = false) => {
+    if (!url) return;
     if (downloadFormat === 'jpg') {
       handleDownloadThumbnail();
       return;
     }
-
     setIsDownloading(true);
-    setDlProgress(50);
     setDlStatus('downloading');
+    setDlProgress(0);
     setDlError('');
-    setDlMessage('Opening PowerShell…');
+    setDlMessage('Connecting to ClipFlow Desktop Helper...');
     setGeneratedCommand('');
 
     try {
-      const res = await fetch('http://localhost:3001/api/video/download', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          url,
-          format: downloadFormat,
-          quality: downloadQuality,
-          trimStart: trimRange[0],
-          trimEnd: trimRange[1],
-          audioBitrate: downloadQuality.replace('kbps', 'k'), // '320kbps' → '320k'
-          aspectRatio: aspectRatio !== 'original' ? aspectRatio : undefined,
-          fitMode: aspectRatio !== 'original' ? fitMode : undefined,
-          customFileName: customFileName,
-        }),
-      });
+      const effectiveFormat = downloadFormat === 'captions' ? subtitleFormat : downloadFormat;
+      const payload = {
+        url,
+        format: effectiveFormat,
+        quality: downloadQuality,
+        trimStart: trimRange[0],
+        trimEnd: trimRange[1],
+        audioBitrate: downloadQuality.replace('kbps', 'k'), // '320kbps' → '320k'
+        aspectRatio: aspectRatio !== 'original' ? aspectRatio : undefined,
+        fitMode: aspectRatio !== 'original' ? fitMode : undefined,
+        customFileName: customFileName,
+        duration: metadata?.duration || 0,
+        subtitleFormat: downloadFormat === 'captions' ? subtitleFormat : undefined,
+        subtitleLang: downloadFormat === 'captions' ? subtitleLang : undefined,
+        relativeTimecodes: true,
+      };
 
-      const data = await res.json();
-      if (data.error) throw new Error(data.error);
+      console.log('%c[ClipFlow VideoPage 🚀 DOWNLOAD TRIGGERED]', 'color: #f59e0b; font-weight: bold;', payload);
 
-      setDlProgress(100);
-      setDlStatus('done');
-      setDlMessage(data.message || 'Terminal opened!');
-      if (data.command) {
-        setGeneratedCommand(data.command);
+      let capturedByHelper = false;
+      if (!forceServerFallback) {
+        // Try 127.0.0.1 first (bypasses Windows IPv6 resolution delay), then localhost
+        for (const endpoint of ['http://127.0.0.1:18942/download', 'http://localhost:18942/download']) {
+          try {
+            console.log(`[ClipFlow VideoPage 📡 SENDING] POST payload -> ${endpoint}`);
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 3500);
+
+            const helperRes = await fetch(endpoint, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(payload),
+              signal: controller.signal,
+            });
+            clearTimeout(timeoutId);
+
+            if (helperRes.ok) {
+              const resData = await helperRes.json();
+              console.log('%c[ClipFlow VideoPage ✅ CAPTURED BY DESKTOP HELPER]', 'color: #22c55e; font-weight: bold;', resData);
+              capturedByHelper = true;
+              setDlProgress(100);
+              setDlStatus('done');
+              setDlMessage('Captured by ClipFlow Desktop Helper! Downloading...');
+              setShowAppDownloadModal(false);
+              break;
+            } else {
+              console.warn(`[ClipFlow VideoPage ⚠️] Helper on ${endpoint} responded with status: ${helperRes.status}`);
+            }
+          } catch (e: any) {
+            console.log(`[ClipFlow VideoPage ℹ️] Qt Desktop Helper not reachable on ${endpoint} (${e.message})`);
+          }
+        }
+      }
+
+      if (!capturedByHelper) {
+        if (!forceServerFallback) {
+          setShowAppDownloadModal(true);
+          setDlStatus('idle');
+          setDlMessage('ClipFlow Desktop App required for direct PC download.');
+          setIsDownloading(false);
+          return;
+        }
+
+        const res = await fetch('http://localhost:3001/api/video/download', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ...payload, mode: 'server' }),
+        });
+
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+
+        if (data.downloadUrl) {
+          const directUrl = data.downloadUrl.startsWith('http')
+            ? data.downloadUrl
+            : `http://localhost:3001${data.downloadUrl}`;
+          const a = document.createElement('a');
+          a.href = directUrl;
+          a.download = data.fileName || `${customFileName || 'clipflow_clip'}.${effectiveFormat}`;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+        }
+
+        setDlProgress(100);
+        setDlStatus('done');
+        setDlMessage(data.message || 'Download complete!');
+        setShowAppDownloadModal(false);
       }
       
       // reset download progress on click anywhere
@@ -336,51 +478,7 @@ export default function VideoPage() {
     }
   };
 
-  // ── AI handler ─────────────────────────────────────────────────────────────
-  const handleAnalyzeAI = async () => {
-    if (!url || isAnalyzing) return;
-    setIsAnalyzing(true);
-    setAiResult(null);
 
-    try {
-      const res = await fetch('http://localhost:3001/api/video/ai/analyze', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url, customPrompt: aiCustomPrompt }),
-      });
-      const data = await res.json();
-      if (data.error) throw new Error(data.error);
-
-      setAiResult(data);
-
-      // Snap the trim range to the recommended clip
-      if (data.recommended_clip) {
-        // Convert "MM:SS" or "HH:MM:SS" to seconds
-        const parseTime = (timeStr: string) => {
-          if (!timeStr) return 0;
-          const parts = timeStr.split(':').map(Number);
-          if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
-          if (parts.length === 2) return parts[0] * 60 + parts[1];
-          return parseInt(timeStr, 10) || 0;
-        };
-
-        const start = parseTime(data.recommended_clip.start_time);
-        const end = parseTime(data.recommended_clip.end_time);
-
-        if (start < end && end <= (metadata?.duration || 100)) {
-          setTrimRange([start, end]);
-          if (youtubePlayerRef.current) {
-            youtubePlayerRef.current.seekTo(start, true);
-          }
-        }
-      }
-    } catch (err: any) {
-      console.error('AI Analysis failed:', err);
-      alert('AI Analysis failed: ' + err.message);
-    } finally {
-      setIsAnalyzing(false);
-    }
-  };
 
   // ── Player Controls ────────────────────────────────────────────────────────
   const togglePlay = () => {
@@ -417,7 +515,7 @@ export default function VideoPage() {
           transition={{ repeat: Infinity, duration: 1, ease: 'linear' }}
           className="w-12 h-12 border-4 border-primary/30 border-t-primary rounded-full"
         />
-        <p className="text-muted-foreground animate-pulse">Extracting metadata via yt-dlp…</p>
+        <p className="text-muted-foreground animate-pulse">Extracting metadata…</p>
       </div>
     );
   }
@@ -457,9 +555,9 @@ export default function VideoPage() {
             href="http://localhost:3001/api/video/tools/download-dlp"
             download
             className="px-4 py-2 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 rounded-xl flex items-center gap-2 text-sm text-emerald-400 transition-colors"
-            title="Download yt-dlp + ffmpeg binaries needed to run downloads"
+            title="Download engine binaries needed to run local processing"
           >
-            <Download className="w-4 h-4" /> Download DLP
+            <Download className="w-4 h-4" /> Download Engine
           </a>
         </div>
       </header>
@@ -500,109 +598,62 @@ export default function VideoPage() {
             </div>
 
             {youtubeId ? (
-              <div className="absolute inset-0 pointer-events-none">
-                <YouTube
-                  videoId={youtubeId}
-                  className="w-full h-full"
-                  iframeClassName={`w-full h-full ${aspectRatio !== 'original' ? (fitMode === 'crop' ? 'object-cover' : 'object-contain') : 'object-contain'} scale-[1.2]`}
-                  opts={{
-                    width: '100%',
-                    height: '100%',
-                    playerVars: {
-                      autoplay: 0,
-                      controls: 0,
-                      disablekb: 1,
-                      fs: 0,
-                      modestbranding: 1,
-                      rel: 0,
-                      showinfo: 0,
-                      iv_load_policy: 3,
-                    },
-                  }}
-                  onReady={e => {
-                    youtubePlayerRef.current = e.target;
-                    if (isMuted) e.target.mute();
-                  }}
-                  onStateChange={e => {
-                    if (e.data === 1) setIsPlaying(true);
-                    else if (e.data === 2) setIsPlaying(false);
-                  }}
-                />
+              <div className="absolute inset-0 flex items-center justify-center overflow-hidden pointer-events-none select-none">
+                <div
+                  className={`flex items-center justify-center overflow-hidden ${
+                    fitMode === 'crop' && aspectRatio !== 'original' && aspectRatio !== '16:9'
+                      ? 'h-full aspect-video shrink-0 max-w-none'
+                      : 'w-full h-full'
+                  }`}
+                >
+                  <YouTube
+                    videoId={youtubeId}
+                    className="w-full h-full flex items-center justify-center pointer-events-none"
+                    iframeClassName="w-full h-full block border-0 pointer-events-none"
+                    opts={{
+                      width: '100%',
+                      height: '100%',
+                      playerVars: {
+                        autoplay: 1,
+                        mute: 1,
+                        controls: 0,
+                        disablekb: 1,
+                        fs: 0,
+                        modestbranding: 1,
+                        rel: 0,
+                        showinfo: 0,
+                        iv_load_policy: 3,
+                        cc_load_policy: 0,
+                        playsinline: 1,
+                      },
+                    }}
+                    onReady={e => {
+                      youtubePlayerRef.current = e.target;
+                      try {
+                        if (typeof e.target.unloadModule === 'function') {
+                          e.target.unloadModule('captions');
+                          e.target.unloadModule('cc');
+                        }
+                      } catch (err) {}
+                      e.target.mute();
+                      e.target.pauseVideo();
+                      if (trimRange[0] > 0) {
+                        e.target.seekTo(trimRange[0], true);
+                      }
+                    }}
+                    onStateChange={e => {
+                      if (e.data === 1) setIsPlaying(true);
+                      else if (e.data === 2) setIsPlaying(false);
+                    }}
+                  />
+                </div>
               </div>
             ) : (
               <img src={metadata?.thumbnail} alt="thumb" className={`w-full h-full opacity-50 ${aspectRatio !== 'original' ? (fitMode === 'crop' ? 'object-cover' : 'object-contain') : 'object-cover'}`} />
             )}
-
-            {/* Play/Pause + Skip controls overlay */}
-            <div className={`absolute inset-0 flex items-center justify-center gap-4 transition-opacity pointer-events-none ${isPlaying ? 'opacity-0 group-hover:opacity-100' : 'opacity-100'}`}>
-              {/* ← 10s back */}
-              <button
-                onClick={async e => {
-                  e.stopPropagation();
-                  if (youtubePlayerRef.current) {
-                    const ct = await youtubePlayerRef.current.getCurrentTime();
-                    youtubePlayerRef.current.seekTo(Math.max(trimRange[0], ct - 10), true);
-                  }
-                }}
-                className="pointer-events-auto flex flex-col items-center gap-1 group/skip cursor-pointer"
-                title="Back 10 seconds"
-              >
-                <div className="p-3 bg-black/50 rounded-full backdrop-blur-md hover:bg-black/70 transition-all hover:scale-110">
-                  <svg xmlns="http://www.w3.org/2000/svg" className="w-6 h-6 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
-                    <path d="M3 3v5h5"/>
-                    <text x="7.5" y="15" fontSize="6" fill="white" stroke="none" fontWeight="bold">10</text>
-                  </svg>
-                </div>
-                <span className="text-[10px] text-white/60 opacity-0 group-hover/skip:opacity-100 transition-opacity">-10s</span>
-              </button>
-
-              {/* Play / Pause */}
-              <button
-                onClick={e => {
-                  e.stopPropagation();
-                  togglePlay();
-                }}
-                className="p-4 bg-black/50 rounded-full backdrop-blur-md pointer-events-auto hover:bg-black/70 transition-all hover:scale-110 cursor-pointer"
-                title={isPlaying ? 'Pause' : 'Play'}
-              >
-                {isPlaying
-                  ? <Pause className="w-8 h-8 text-white fill-white" />
-                  : <Play  className="w-8 h-8 ml-1 text-white fill-white" />}
-              </button>
-
-              {/* +10s forward */}
-              <button
-                onClick={async e => {
-                  e.stopPropagation();
-                  if (youtubePlayerRef.current) {
-                    const ct = await youtubePlayerRef.current.getCurrentTime();
-                    youtubePlayerRef.current.seekTo(Math.min(trimRange[1], ct + 10), true);
-                  }
-                }}
-                className="pointer-events-auto flex flex-col items-center gap-1 group/skip"
-                title="Forward 10 seconds"
-              >
-                <div className="p-3 bg-black/50 rounded-full backdrop-blur-md hover:bg-black/70 transition-all hover:scale-110">
-                  <svg xmlns="http://www.w3.org/2000/svg" className="w-6 h-6 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M21 12a9 9 0 1 1-9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/>
-                    <path d="M21 3v5h-5"/>
-                    <text x="7.5" y="15" fontSize="6" fill="white" stroke="none" fontWeight="bold">10</text>
-                  </svg>
-                </div>
-                <span className="text-[10px] text-white/60 opacity-0 group-hover/skip:opacity-100 transition-opacity">+10s</span>
-              </button>
-            </div>
-
-            {/* Bottom note about preview quality */}
-            <div className="absolute bottom-3 left-3 opacity-0 group-hover:opacity-100 transition-opacity">
-              <span className="text-xs bg-black/60 px-2 py-1 rounded-md text-white/70 backdrop-blur-sm">
-                Preview: YouTube Embed
-              </span>
-            </div>
           </div>
 
-          {/* Timeline */}
+          {/* Timeline & Controls */}
           <div className="bg-white/5 rounded-2xl border border-white/10 p-6 shadow-lg space-y-4">
             <div className="flex justify-between items-center text-xs text-muted-foreground">
               <EditableTime value={trimRange[0]} min={0} max={trimRange[1] - 1} onChange={v => onSliderChange([v, trimRange[1]])} />
@@ -668,6 +719,69 @@ export default function VideoPage() {
                   </div>
                 );
               })()}
+            </div>
+
+            {/* Play/Pause & Skip Controls Bar below video */}
+            <div className="flex items-center justify-between pt-3 border-t border-white/10">
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={async (e) => {
+                    e.stopPropagation();
+                    if (youtubePlayerRef.current) {
+                      const ct = await youtubePlayerRef.current.getCurrentTime();
+                      youtubePlayerRef.current.seekTo(Math.max(trimRange[0], ct - 10), true);
+                    }
+                  }}
+                  className="px-2.5 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-white transition-all flex items-center gap-1 text-xs font-semibold cursor-pointer"
+                  title="Rewind 10 seconds"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span>10s</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    togglePlay();
+                  }}
+                  className="px-4 py-1.5 rounded-lg bg-primary hover:bg-primary/80 text-white transition-all flex items-center gap-1.5 text-xs font-bold cursor-pointer shadow-md shadow-primary/20"
+                  title={isPlaying ? 'Pause' : 'Play'}
+                >
+                  {isPlaying ? (
+                    <>
+                      <Pause className="w-4 h-4 fill-white" />
+                      <span>Pause</span>
+                    </>
+                  ) : (
+                    <>
+                      <Play className="w-4 h-4 fill-white ml-0.5" />
+                      <span>Play</span>
+                    </>
+                  )}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={async (e) => {
+                    e.stopPropagation();
+                    if (youtubePlayerRef.current) {
+                      const ct = await youtubePlayerRef.current.getCurrentTime();
+                      youtubePlayerRef.current.seekTo(Math.min(trimRange[1], ct + 10), true);
+                    }
+                  }}
+                  className="px-2.5 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-white transition-all flex items-center gap-1 text-xs font-semibold cursor-pointer"
+                  title="Forward 10 seconds"
+                >
+                  <RotateCw className="w-3.5 h-3.5" />
+                  <span>10s</span>
+                </button>
+              </div>
+
+              <div className="text-xs font-mono text-white/70">
+                <span>{formatTime(currentTime)}</span> / <span>{formatTime(metadata?.duration || 0)}</span>
+              </div>
             </div>
           </div>
 
@@ -760,7 +874,7 @@ export default function VideoPage() {
               <div>
                 <label className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2 block">Format</label>
                 <div className="grid grid-cols-4 gap-2">
-                  {['mp4', 'mp3', 'wav', 'jpg'].map(fmt => (
+                  {['mp4', 'mp3', 'captions', 'jpg'].map(fmt => (
                     <button
                       key={fmt}
                       onClick={() => {
@@ -770,6 +884,8 @@ export default function VideoPage() {
                           setDownloadQuality(qualityOptions[0]?.label || '');
                         } else if (fmt === 'jpg') {
                           setDownloadQuality('Max Resolution');
+                        } else if (fmt === 'captions') {
+                          setDownloadQuality('Timeline Subtitles');
                         } else {
                           setDownloadQuality('320kbps');
                         }
@@ -780,7 +896,7 @@ export default function VideoPage() {
                           : 'border-white/10 bg-black/30 text-white/70 hover:border-white/30 hover:text-white'
                       }`}
                     >
-                      {fmt === 'jpg' ? 'JPG' : fmt}
+                      {fmt === 'jpg' ? 'JPG' : fmt === 'captions' ? 'CAPTIONS' : fmt}
                     </button>
                   ))}
                 </div>
@@ -796,7 +912,7 @@ export default function VideoPage() {
                     {qualityOptions.map(opt => {
                       const size = opt.filesize
                         ? formatBytes(opt.filesize * (trimDuration / (metadata?.duration || 1)))
-                        : estimateSize(opt.tbr, trimDuration);
+                        : estimateSize(opt.tbr, trimDuration, opt.height);
                       return (
                         <button
                           key={opt.label}
@@ -816,8 +932,8 @@ export default function VideoPage() {
                 </div>
               )}
 
-              {/* AUDIO quality grid — shown for mp3 / wav */}
-              {(downloadFormat === 'mp3' || downloadFormat === 'wav') && (() => {
+              {/* AUDIO quality grid — shown for mp3 */}
+              {downloadFormat === 'mp3' && (() => {
                 const audioBitrates = [
                   { label: '320kbps', kbps: 320 },
                   { label: '192kbps', kbps: 192 },
@@ -853,6 +969,60 @@ export default function VideoPage() {
                 );
               })()}
 
+              {/* CAPTIONS options — shown for captions */}
+              {downloadFormat === 'captions' && (
+                <div className="p-3 bg-black/40 border border-white/10 rounded-xl space-y-3">
+                  <div>
+                    <label className="text-xs font-medium text-muted-foreground uppercase tracking-wider block mb-1.5">
+                      Subtitle Format
+                    </label>
+                    <div className="grid grid-cols-3 gap-2">
+                      {(['srt', 'vtt', 'txt'] as const).map(fmt => (
+                        <button
+                          key={fmt}
+                          onClick={() => setSubtitleFormat(fmt)}
+                          className={`py-1.5 rounded-lg border text-xs font-bold uppercase transition-all ${
+                            subtitleFormat === fmt
+                              ? 'border-emerald-500 bg-emerald-500/20 text-emerald-300'
+                              : 'border-white/10 bg-black/30 text-white/70 hover:border-white/30 hover:text-white'
+                          }`}
+                        >
+                          {fmt.toUpperCase()}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="pt-1 space-y-2">
+                    <div>
+                      <label className="text-[11px] font-medium text-muted-foreground uppercase block mb-1">
+                        Language
+                      </label>
+                      <select
+                        value={subtitleLang}
+                        onChange={e => setSubtitleLang(e.target.value)}
+                        className="w-full bg-black/50 border border-white/10 rounded-lg px-2 py-1.5 text-xs text-white focus:outline-none focus:border-emerald-500"
+                      >
+                        <option value="en">English (en)</option>
+                        <option value="es">Spanish (es)</option>
+                        <option value="fr">French (fr)</option>
+                        <option value="de">German (de)</option>
+                        <option value="ja">Japanese (ja)</option>
+                        <option value="ko">Korean (ko)</option>
+                        <option value="zh">Chinese (zh)</option>
+                        <option value="hi">Hindi (hi)</option>
+                        <option value="ar">Arabic (ar)</option>
+                      </select>
+                    </div>
+
+                    <div className="text-[10px] text-emerald-300/90 bg-emerald-500/10 border border-emerald-500/20 rounded-lg p-2 flex items-center gap-1.5">
+                      <span>⏱️</span>
+                      <span>Auto-trimmed to your timeline [{formatTime(trimRange[0])} - {formatTime(trimRange[1])}] & starts at 00:00:00.</span>
+                    </div>
+                  </div>
+                </div>
+              )}
+
               {/* THUMBNAIL info — shown for jpg */}
               {downloadFormat === 'jpg' && (
                 <div className="p-3 bg-black/40 border border-white/10 rounded-xl space-y-2">
@@ -868,7 +1038,7 @@ export default function VideoPage() {
 
               {/* Download Button */}
               <button
-                onClick={handleDownload}
+                onClick={() => handleDownload(false)}
                 disabled={isDownloading || !downloadQuality}
                 className="w-full py-3 bg-primary text-primary-foreground rounded-xl flex items-center justify-center gap-2 font-semibold text-sm hover:bg-primary/90 active:scale-95 transition-all shadow-[0_0_20px_rgba(59,130,246,0.4)] disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100"
               >
@@ -886,157 +1056,42 @@ export default function VideoPage() {
             </div>
           </div>
 
-          {/* AI Assistant */}
-          <div className="p-6 bg-white/5 rounded-2xl border border-white/10 flex flex-col shadow-lg">
+          {/* AI Assistant (Coming Soon) */}
+          <div className="p-6 bg-white/5 rounded-2xl border border-white/10 flex flex-col shadow-lg relative overflow-hidden">
             <div className="flex items-center justify-between mb-4">
               <div className="flex items-center gap-2">
                 <Sparkles className="w-5 h-5 text-purple-400" />
                 <h3 className="font-semibold text-purple-100">AI Clip Extractor</h3>
               </div>
+              <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold uppercase tracking-wider bg-amber-500/15 text-amber-300 border border-amber-500/30">
+                Coming Soon
+              </span>
             </div>
 
-            {!aiResult ? (
-              <div className="flex flex-col items-center justify-center text-center space-y-4 py-4">
-                <p className="text-sm text-muted-foreground">
-                  Use AI to automatically extract the best viral clip based on comments and subtitles.
-                </p>
-                <textarea
-                  value={aiCustomPrompt}
-                  onChange={(e) => setAiCustomPrompt(e.target.value)}
-                  placeholder="Optional: Add specific instructions (e.g., 'Find the funniest moment where they talk about speed')"
-                  className="w-full h-20 p-3 bg-black/40 border border-white/10 rounded-xl text-sm focus:outline-none focus:ring-1 focus:ring-purple-500 text-white resize-none"
-                />
-                <button
-                  onClick={handleAnalyzeAI}
-                  disabled={isAnalyzing}
-                  className="w-full py-2.5 bg-purple-600 hover:bg-purple-500 text-white rounded-xl flex items-center justify-center gap-2 font-medium text-sm transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {isAnalyzing ? (
-                    <><Loader2 className="w-4 h-4 animate-spin" /> Analyzing (this takes a moment)...</>
-                  ) : (
-                    <><Sparkles className="w-4 h-4" /> Recommend Viral Clip</>
-                  )}
-                </button>
-              </div>
-            ) : (
-              <div className="space-y-4 text-sm animate-in fade-in zoom-in duration-300">
-                <div className="bg-purple-500/10 border border-purple-500/30 p-4 rounded-xl space-y-3">
-                  <div className="flex items-start justify-between gap-4">
-                    <h4 className="font-bold text-purple-200 leading-tight">
-                      {aiResult.recommended_clip?.title || 'Recommended Clip'}
-                    </h4>
-                    <span className="bg-purple-500/20 text-purple-300 text-xs px-2 py-1 rounded-md font-bold whitespace-nowrap">
-                      {aiResult.recommended_clip?.confidence}% Match
-                    </span>
-                  </div>
-                  <p className="text-purple-200/80 text-xs leading-relaxed">
-                    {aiResult.recommended_clip?.reason}
-                  </p>
-                  
-                  <div className="pt-2 border-t border-purple-500/20">
-                    <p className="text-xs text-muted-foreground mb-1">Hashtags:</p>
-                    <div className="flex flex-wrap gap-1">
-                      {aiResult.recommended_clip?.hashtags?.slice(0, 5).map((tag: string) => (
-                        <span key={tag} className="text-[10px] bg-black/40 text-purple-300 px-1.5 py-0.5 rounded">
-                          {tag}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-
-                <div className="flex gap-2">
-                  <button
-                    onClick={handleAnalyzeAI}
-                    disabled={isAnalyzing}
-                    className="flex-1 py-2 bg-white/10 hover:bg-white/20 rounded-lg text-xs font-medium transition-colors"
-                  >
-                    {isAnalyzing ? 'Analyzing...' : 'Analyze Again'}
-                  </button>
-                </div>
-              </div>
-            )}
+            <div className="flex flex-col items-center justify-center text-center space-y-4 py-4">
+              <p className="text-sm text-muted-foreground">
+                Automatic AI extraction of high-retention viral segments and hooks is coming in the next update.
+              </p>
+              <textarea
+                disabled={true}
+                readOnly={true}
+                value=""
+                placeholder="🔒 Custom AI instructions and viral clip analysis coming soon..."
+                className="w-full h-20 p-3 bg-black/40 border border-white/10 rounded-xl text-sm text-gray-500 placeholder-gray-500 resize-none cursor-not-allowed select-none focus:outline-none"
+              />
+              <button
+                type="button"
+                disabled={true}
+                className="w-full py-2.5 bg-white/5 border border-white/10 text-gray-400 rounded-xl flex items-center justify-center gap-2 font-medium text-sm transition-all cursor-not-allowed opacity-60"
+              >
+                <Sparkles className="w-4 h-4 text-amber-400" /> Recommend Viral Clip (Coming Soon)
+              </button>
+            </div>
           </div>
         </div>
       </div>
     </div>
 
-      {/* ── Generated Command Modal ────────────────────────────────────────── */}
-      <AnimatePresence>
-        {generatedCommand && (dlStatus === 'done' || dlStatus === 'idle') && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 z-50 flex items-center justify-center p-6 bg-black/60 backdrop-blur-sm"
-          >
-            <motion.div
-              initial={{ scale: 0.95, opacity: 0, y: 20 }}
-              animate={{ scale: 1, opacity: 1, y: 0 }}
-              exit={{ scale: 0.95, opacity: 0, y: 20 }}
-              className="bg-[#111] border border-emerald-500/30 w-full max-w-3xl rounded-3xl shadow-[0_0_50px_rgba(16,185,129,0.15)] relative flex flex-col max-h-[90vh]"
-            >
-              {/* Close Button */}
-              <button
-                onClick={() => {
-                  setGeneratedCommand('');
-                  setDlStatus('idle');
-                }}
-                className="absolute top-4 right-4 p-2 text-white/50 hover:text-white hover:bg-white/10 rounded-full transition-colors"
-                title="Close"
-              >
-                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
-              </button>
-
-              <div className="p-8 pb-4">
-                <div className="flex items-center gap-3 mb-2">
-                  <div className="w-10 h-10 rounded-full bg-emerald-500/20 flex items-center justify-center text-emerald-400">
-                    <CheckCircle className="w-5 h-5" />
-                  </div>
-                  <h2 className="text-2xl font-bold text-emerald-50">Download Started Successfully</h2>
-                </div>
-                <p className="text-emerald-100/70 ml-13">
-                  {dlMessage || 'A terminal window has opened to process your video. It will close automatically when finished.'}
-                </p>
-              </div>
-
-              <div className="px-8 py-4 flex-1 overflow-hidden flex flex-col min-h-0">
-                <div className="flex items-center justify-between mb-2">
-                  <h3 className="text-sm font-semibold text-white/60 uppercase tracking-wider">Executed Command</h3>
-                  <button
-                    onClick={() => {
-                      navigator.clipboard.writeText(generatedCommand);
-                      setDlMessage('Copied to clipboard!');
-                      setTimeout(() => setDlMessage('Terminal will close automatically when done.'), 3000);
-                    }}
-                    className="flex items-center gap-2 px-3 py-1.5 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 rounded-lg text-sm font-medium transition-colors"
-                  >
-                    <Copy className="w-4 h-4" /> Copy Command
-                  </button>
-                </div>
-                
-                <div className="bg-black/60 border border-white/10 rounded-xl p-4 overflow-y-auto max-h-[40vh] custom-scrollbar">
-                  <pre className="text-emerald-400/90 font-mono text-sm leading-relaxed whitespace-pre-wrap break-all">
-                    {generatedCommand}
-                  </pre>
-                </div>
-              </div>
-
-              <div className="p-6 pt-4 mt-auto">
-                <button
-                  onClick={() => {
-                    setGeneratedCommand('');
-                    setDlStatus('idle');
-                  }}
-                  className="w-full py-3 bg-white/5 hover:bg-white/10 border border-white/10 rounded-xl text-white font-semibold transition-colors"
-                >
-                  Close & Continue
-                </button>
-              </div>
-            </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
 
     {/* ── Download Progress Modal ───────────────────────────────────────── */}
     <AnimatePresence>
@@ -1134,6 +1189,79 @@ export default function VideoPage() {
         </motion.div>
       )}
     </AnimatePresence>
+
+    {/* ── ClipFlow Desktop App Required Modal ──────────────────────────────── */}
+    {showAppDownloadModal && (
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-md animate-in fade-in duration-200">
+        <div className="bg-[#0c0c0f] border border-purple-500/30 w-full max-w-md rounded-3xl p-6 sm:p-7 shadow-[0_0_50px_rgba(168,85,247,0.2)] relative space-y-5">
+          {/* Close Button */}
+          <button
+            onClick={() => setShowAppDownloadModal(false)}
+            className="absolute top-4 right-4 p-2 text-gray-400 hover:text-white hover:bg-white/10 rounded-full transition-colors"
+            title="Close"
+          >
+            <X className="w-4 h-4" />
+          </button>
+
+          {/* Header / Icon */}
+          <div className="flex items-start gap-4">
+            <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-purple-500/20 to-pink-500/20 border border-purple-500/40 flex items-center justify-center shrink-0 shadow-lg shadow-purple-500/20">
+              <Monitor className="w-6 h-6 text-purple-400" />
+            </div>
+            <div className="space-y-1">
+              <h3 className="text-lg font-bold text-white leading-tight">ClipFlow Desktop App Required</h3>
+              <p className="text-xs text-gray-400 leading-relaxed">
+                The lightweight 1:1 floating companion app must be running on your PC to download and auto-crop clips without terminal popups.
+              </p>
+            </div>
+          </div>
+
+          {/* Feature Highlights */}
+          <div className="p-3.5 bg-black/40 border border-white/10 rounded-2xl space-y-2 text-xs text-gray-300">
+            <div className="flex items-center gap-2">
+              <Check className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+              <span>1:1 Floating Circular Progress Widget</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <Check className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+              <span>Automatic 9:16 / 1:1 / 4:5 Smart Cropping</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <Check className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+              <span>Auto file numbering <span className="font-mono text-purple-300">(1), (2)</span> for duplicates</span>
+            </div>
+          </div>
+
+          {/* Actions */}
+          <div className="space-y-2.5 pt-1">
+            <a
+              href="http://localhost:3001/api/video/tools/download-dlp"
+              download
+              className="w-full py-3 rounded-xl bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-500 hover:to-pink-500 text-white font-bold text-xs flex items-center justify-center gap-2 shadow-lg shadow-purple-500/25 transition-all"
+            >
+              <Download className="w-4 h-4" />
+              <span>Download ClipFlow Desktop Companion</span>
+            </a>
+
+            <div className="flex gap-2">
+              <button
+                onClick={() => handleDownload(false)}
+                className="flex-1 py-2.5 rounded-xl bg-white/10 hover:bg-white/15 border border-white/15 text-white font-semibold text-xs flex items-center justify-center gap-1.5 transition-colors"
+              >
+                <RefreshCw className="w-3.5 h-3.5 text-purple-400" />
+                <span>I've Started App (Retry)</span>
+              </button>
+              <button
+                onClick={() => handleDownload(true)}
+                className="py-2.5 px-3 rounded-xl bg-black/40 hover:bg-white/5 border border-white/10 text-gray-400 hover:text-gray-200 text-xs transition-colors"
+              >
+                Server Fallback
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    )}
     </>
   );
 }

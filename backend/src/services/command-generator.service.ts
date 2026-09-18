@@ -102,19 +102,22 @@ export function generatePowerShellWorkflow(options: CommandGeneratorOptions): Ge
   let ytDlpCmd = '';
   let ffmpegCmd = '';
 
+  const isYouTube = url.includes('youtube.com') || url.includes('youtu.be');
+  const ytExtractorArgs = '';
+
   if (isAudio) {
     // ── MP3 / Audio Extraction ──────────────────────────────────────────────
     const sectionFlag = isTrimmed ? `--download-sections "*${startTimeStr}-${endTimeStr}" ` : '';
     const keyframesFlag = isTrimmed ? `--force-keyframes-at-cuts ` : '';
     
-    ytDlpCmd = `.\\yt-dlp.exe --js-runtimes node ${sectionFlag}-x --audio-format ${format} --audio-quality ${cleanAudioQuality} ${keyframesFlag}--no-playlist -o "${finalOutputPath}" "${url}"`.replace(/\s+/g, ' ');
+    ytDlpCmd = `.\\yt-dlp.exe --js-runtimes node ${ytExtractorArgs}${sectionFlag}-x --audio-format ${format} --audio-quality ${cleanAudioQuality} ${keyframesFlag}--no-playlist -o "${finalOutputPath}" "${url}"`.replace(/\s+/g, ' ');
     powerShellScript = ytDlpCmd;
   } else {
     // ── MP4 Video Download ──────────────────────────────────────────────────
     const sectionFlag = isTrimmed ? `--download-sections "*${startTimeStr}-${endTimeStr}" ` : '';
     const keyframesFlag = isTrimmed ? `--force-keyframes-at-cuts ` : '';
 
-    ytDlpCmd = `.\\yt-dlp.exe --js-runtimes node ${sectionFlag}-f "${ytFormat}" --merge-output-format mp4 ${keyframesFlag}--no-playlist -o "${finalOutputPath}" "${url}"`.replace(/\s+/g, ' ');
+    ytDlpCmd = `.\\yt-dlp.exe --js-runtimes node ${ytExtractorArgs}${sectionFlag}-f "${ytFormat}" --merge-output-format mp4 ${keyframesFlag}--no-playlist -o "${finalOutputPath}" "${url}"`.replace(/\s+/g, ' ');
     powerShellScript = ytDlpCmd;
   }
 

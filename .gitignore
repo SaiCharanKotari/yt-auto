@@ -1,47 +1,98 @@
-# =========================
-# BACKEND
-# =========================
+# =======================================================
+# ClipFlow / YT-Auto .gitignore
+# =======================================================
 
-# Antigravity IDE config (contains secrets)
-.antigravity
-
+# --- Environment & Secret Keys ---
+.env
+.env.*
+!.env.example
 backend/.env
-backend/node_modules/
+backend/.env.*
+!backend/.env.example
+atlas-credentials.env
 backend/atlas-credentials.env
+cookies.txt
+backend/cookies.txt
+*.pem
+*.key
 
+# --- Antigravity IDE & Editor Cache ---
+.antigravity
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+Thumbs.db
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# --- Logs ---
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# --- Dependencies ---
+node_modules/
+backend/node_modules/
+frontend/node_modules/
+
+# --- Build Outputs ---
+dist/
+dist-ssr/
+build/
+backend/dist/
+frontend/dist/
+frontend/dist-ssr/
+*.local
+
+# --- Media, Temp Dumps, & Transcodes ---
+temp/
+backend/temp/
+backend/temp/**
+backend/data/
+backend/public/downloads/*
+!backend/public/downloads/.gitkeep
+*.part
+*.mp4
+*.m4a
+*.webm
+*.mkv
+
+# --- Binaries & Native Tools ---
+*.exe
+*.zip
+*.tar.gz
+*.dmg
+inno_setup.exe
+yt-dlp
+yt-dlp.exe
+backend/yt-dlp.exe
+backend/yt-dlp_new.exe
 backend/ffmpeg.exe
 backend/ffplay.exe
 backend/ffprobe.exe
-backend/yt-dlp.exe
-
-backend/dqw_info.json
 backend/download dlp.zip
+FFmpeg
+FFmpeg/
+release/
+qt-app/
 
-
-# =========================
-# FRONTEND
-# =========================
-
-frontend/logs/
-frontend/*.log
-frontend/npm-debug.log*
-frontend/yarn-debug.log*
-frontend/yarn-error.log*
-frontend/pnpm-debug.log*
-frontend/lerna-debug.log*
-
-frontend/node_modules/
-frontend/dist/
-frontend/dist-ssr/
-frontend/*.local
-
-frontend/.vscode/*
-!frontend/.vscode/extensions.json
-
-frontend/.idea/
-frontend/.DS_Store
-frontend/*.suo
-frontend/*.ntvs*
-frontend/*.njsproj
-frontend/*.sln
-frontend/*.sw?
+# --- Scratch Scripts, Dumps & Testing Artifacts ---
+__pycache__/
+*.pyc
+.twitch
+.twitch/
+available_domains.json
+available_domains.txt
+backend/dqw_info.json
+backend/app-version.json
+test.js
+test2.ts
+test_com.py

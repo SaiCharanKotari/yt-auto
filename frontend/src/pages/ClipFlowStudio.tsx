@@ -4,12 +4,14 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { 
   Scissors, Sparkles, Download, 
   Copy, Check, AlertCircle, RefreshCw, Film, 
-  Clock, Zap, CheckCircle2, ChevronRight, Layers, 
+  Clock, CheckCircle2, ChevronRight, Layers, 
   Sliders, ShieldCheck, History,
-  ArrowLeft, Terminal, FileVideo
+  ArrowLeft, FileVideo, Lock,
+  Monitor, X
 } from 'lucide-react';
 import * as Slider from '@radix-ui/react-slider';
 import YouTube, { type YouTubePlayer } from 'react-youtube';
+import { getCachedMetadata, setCachedMetadata } from '../utils/metadataCache';
 
 // ─── Custom Icons ────────────────────────────────────────────────────────────
 function YoutubeIcon({ className }: { className?: string }) {
@@ -128,22 +130,21 @@ export default function ClipFlowStudio() {
   // Export Settings
   const [aspectRatio, setAspectRatio] = useState<'16:9' | '9:16' | '1:1' | '4:5'>('16:9');
   const [fitMode, setFitMode] = useState<'crop' | 'pad'>('crop');
-  const [downloadFormat, setDownloadFormat] = useState<'mp4' | 'mp3' | 'wav'>('mp4');
+  const [downloadFormat, setDownloadFormat] = useState<'mp4' | 'mp3' | 'captions'>('mp4');
+  const [captionFormat, setCaptionFormat] = useState<'srt' | 'vtt' | 'txt'>('srt');
+  const [captionLang, setCaptionLang] = useState<string>('en');
   const [downloadQuality, setDownloadQuality] = useState('1080p');
   const [customFileName, setCustomFileName] = useState('');
   const [qualityOptions, setQualityOptions] = useState<QualityOption[]>([]);
 
   // AI Highlights State
-  const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [aiHighlights, setAiHighlights] = useState<AIHighlight[]>([]);
-  const [aiCustomPrompt, setAiCustomPrompt] = useState('');
 
   // Download & Execution State
   const [isDownloading, setIsDownloading] = useState(false);
   const [downloadStatus, setDownloadStatus] = useState<'idle' | 'running' | 'success' | 'error'>('idle');
   const [statusMessage, setStatusMessage] = useState('');
-  const [generatedCommand, setGeneratedCommand] = useState('');
-  const [copiedCmd, setCopiedCmd] = useState(false);
+  const [showAppDownloadModal, setShowAppDownloadModal] = useState(false);
 
   // History State
   const [clipHistory, setClipHistory] = useState<ClipHistoryItem[]>([]);
@@ -183,60 +184,179 @@ export default function ClipFlowStudio() {
       .catch(() => setBackendOnline(false));
   }, []);
 
-  // Fetch Video Metadata
-  const fetchVideo = async (targetUrl: string) => {
+  // Fetch Video Metadata (Cached for Instant Tab Transitions)
+  const fetchVideo = async (targetUrl: string, forceRefresh: boolean = false) => {
     if (!targetUrl) return;
     setErrorMeta('');
-    setIsLoadingMeta(true);
-    setMetadata(null);
     setAiHighlights([]);
-    setGeneratedCommand('');
     setDownloadStatus('idle');
 
+    let data: any = null;
+
+    // 0. Check instant cache if not forcing refresh
+    if (!forceRefresh) {
+      const cached = getCachedMetadata(targetUrl);
+      if (cached) {
+        data = cached;
+        console.log('%c[ClipFlow Studio ⚡ METADATA LOADED FROM CACHE (INSTANT)]', 'color: #22c55e; font-weight: bold;', {
+          targetUrl,
+          title: cached.title,
+          duration: cached.duration_string || cached.duration,
+        });
+      }
+    }
+
+    let lastErrorMessage = '';
+    if (!data) {
+      setIsLoadingMeta(true);
+      setMetadata(null);
+      console.log('%c[ClipFlow Studio 📡 METADATA REQUEST]', 'color: #38bdf8; font-weight: bold;', { targetUrl });
+
+      // 1. Try Desktop Helper App (port 18942) or backend (port 3001)
+      const endpoints = [
+        'http://localhost:3001/api/video/metadata',
+        'http://127.0.0.1:18942/metadata',
+      ];
+      for (const endpoint of endpoints) {
+        try {
+          console.log(`[ClipFlow Studio 📡] Querying metadata from: ${endpoint}`);
+          const controller = new AbortController();
+          const isHelper = endpoint.includes('18942');
+          const timeoutId = setTimeout(() => controller.abort(), isHelper ? 1500 : 25000);
+          const res = await fetch(endpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url: targetUrl }),
+            signal: controller.signal,
+          });
+          clearTimeout(timeoutId);
+
+          if (res.ok) {
+            const json = await res.json();
+            if (json && !json.error && (json.title || json.id)) {
+              data = json;
+              console.log('%c[ClipFlow Studio 📥 METADATA SUCCESS]', 'color: #22c55e; font-weight: bold;', {
+                endpoint,
+                title: json.title,
+                duration: json.duration_string || json.duration,
+                formatsCount: json.formats?.length || 0,
+              });
+              break;
+            }
+          } else {
+            const errJson = await res.json().catch(() => null);
+            if (errJson?.error) {
+              lastErrorMessage = errJson.error;
+            }
+          }
+        } catch (e: any) {
+          console.warn(`[ClipFlow Studio ⚠️] Endpoint ${endpoint} unreachable: ${e.message}`);
+          if (!lastErrorMessage && e.name !== 'AbortError') {
+            lastErrorMessage = e.message;
+          }
+        }
+      }
+
+      // 2. If servers are offline but it's a YouTube video, use public oEmbed
+      if (!data) {
+        const ytId = extractYouTubeId(targetUrl);
+        if (ytId) {
+          try {
+            const oembedRes = await fetch(`https://noembed.com/embed?url=https://www.youtube.com/watch?v=${ytId}`);
+            if (oembedRes.ok) {
+              const oembed = await oembedRes.json();
+              data = {
+                id: ytId,
+                title: oembed.title || 'YouTube Video',
+                thumbnail: `https://img.youtube.com/vi/${ytId}/maxresdefault.jpg`,
+                uploader: oembed.author_name || 'YouTube Creator',
+                duration: 0,
+                duration_string: '00:00',
+                formats: [],
+              };
+            }
+          } catch (e) { }
+
+          if (!data) {
+            data = {
+              id: ytId,
+              title: 'YouTube Video',
+              thumbnail: `https://img.youtube.com/vi/${ytId}/hqdefault.jpg`,
+              uploader: 'YouTube Creator',
+              duration: 0,
+              duration_string: '00:00',
+              formats: [],
+            };
+          }
+        }
+      }
+
+      // Save into cache for future instant transitions
+      if (data) {
+        setCachedMetadata(targetUrl, data);
+      }
+    }
+
     try {
-      const res = await fetch('http://localhost:3001/api/video/metadata', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: targetUrl }),
-      });
-      const data = await res.json();
-      if (data.error) throw new Error(data.error);
+      if (!data) {
+        throw new Error(lastErrorMessage || 'Could not fetch video details. Ensure the Desktop Helper app or backend is running.');
+      }
 
       setMetadata(data);
-      const totalDur = data.duration || 120;
-      const initialEnd = Math.min(60, totalDur);
-      setTrimRange([0, initialEnd]);
+      const isLive = Boolean(
+        data.is_live === true ||
+        data.live_status === 'is_live' ||
+        targetUrl.toLowerCase().includes('youtube.com/live') ||
+        targetUrl.toLowerCase().includes('/live/') ||
+        targetUrl.toLowerCase().includes('youtu.be/live') ||
+        ((targetUrl.toLowerCase().includes('twitch.tv/') || targetUrl.toLowerCase().includes('kick.com/')) &&
+          !targetUrl.toLowerCase().includes('/clip') &&
+          !targetUrl.toLowerCase().includes('/video') &&
+          !targetUrl.toLowerCase().includes('/videos'))
+      );
+      let totalDur = data.duration && data.duration > 0 ? data.duration : 0;
+      if (isLive && totalDur <= 0) {
+        if (data.release_timestamp && data.release_timestamp > 0) {
+          const elapsed = Math.floor(Date.now() / 1000 - data.release_timestamp);
+          if (elapsed > 0) totalDur = elapsed;
+        }
+        // if (totalDur <= 0) totalDur = 300; // 5 mins fallback commented out
+      }
+      setTrimRange([0, totalDur]);
       setCustomFileName((data.title || 'ClipFlow_Video').replace(/[^\w\s-]/gi, '').trim());
 
       // Parse qualities
       const heightSet = new Set<number>();
       (data.formats || []).forEach((f: any) => {
         if (!f.vcodec || f.vcodec === 'none') return;
-        const resMatch = (f.resolution || '').match(/\d+x(\d+)/);
-        if (resMatch) {
-          const h = parseInt(resMatch[1]);
-          if (h >= 240) heightSet.add(h);
+        let h = f.height || 0;
+        if (!h) {
+          const resMatch = (f.resolution || '').match(/\d+x(\d+)/);
+          if (resMatch) h = parseInt(resMatch[1]);
         }
+        if (h >= 144) heightSet.add(h);
       });
 
-      const sortedHeights = Array.from(heightSet).sort((a, b) => b - a);
-      const opts: QualityOption[] = sortedHeights.map(h => {
+      const allStandardHeights = [2160, 1440, 1080, 720, 480, 360, 240];
+      const opts: QualityOption[] = allStandardHeights.map(h => {
         const matching = (data.formats || []).filter((f: any) => {
-          const match = (f.resolution || '').match(/\d+x(\d+)/);
-          return match && parseInt(match[1]) === h;
+          let fh = f.height || 0;
+          if (!fh) {
+            const match = (f.resolution || '').match(/\d+x(\d+)/);
+            if (match) fh = parseInt(match[1]);
+          }
+          return fh === h;
         });
         const best = matching.reduce((a: any, b: any) => (b.tbr || 0) > (a.tbr || 0) ? b : a, matching[0]);
+        const label = `${h}p`;
         return {
-          label: `${h}p`,
+          label,
           height: h,
-          format_id: best?.format_id || '',
+          format_id: best?.format_id || 'best',
           tbr: best?.tbr,
+          isNative: true,
         };
       });
-
-      if (opts.length === 0) {
-        opts.push({ label: '1080p', height: 1080, format_id: 'best' }, { label: '720p', height: 720, format_id: '720' });
-      }
 
       setQualityOptions(opts);
       if (opts.find(o => o.height === 1080)) {
@@ -334,99 +454,6 @@ export default function ClipFlowStudio() {
       setTrimRange([trimRange[0], next]);
     }
   };
-
-  // AI Highlights Scan
-  const handleRunAiAnalysis = async () => {
-    if (!activeUrl) return;
-    setIsAnalyzing(true);
-    try {
-      const res = await fetch('http://localhost:3001/api/video/ai/analyze', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          url: activeUrl,
-          customPrompt: aiCustomPrompt || 'Find the top 3 most engaging, funny, or viral short clips for TikTok/Shorts with exact timestamps.',
-        }),
-      });
-      const data = await res.json();
-      if (data.error) throw new Error(data.error);
-
-      // Parse highlights
-      if (Array.isArray(data.highlights)) {
-        setAiHighlights(data.highlights);
-      } else if (data.moments && Array.isArray(data.moments)) {
-        setAiHighlights(data.moments.map((m: any) => ({
-          title: m.title || 'Viral Hook',
-          start: parseTime(m.startTime || '0:00'),
-          end: parseTime(m.endTime || '0:30'),
-          hookScore: m.score || 94,
-          reason: m.description || m.hook || 'High engagement moment detected',
-          tag: m.tag || 'Viral Hook',
-        })));
-      } else {
-        // Fallback intelligent highlights
-        const total = metadata?.duration || 180;
-        setAiHighlights([
-          {
-            title: '🔥 High-Energy Intro & Hook',
-            start: 0,
-            end: Math.min(45, total),
-            hookScore: 98,
-            reason: 'Opening strong hook with punchy summary',
-            tag: 'Top Hook'
-          },
-          {
-            title: '⚡ Core Highlight & Key Climax',
-            start: Math.floor(total * 0.35),
-            end: Math.floor(total * 0.35) + Math.min(50, Math.floor(total * 0.2)),
-            hookScore: 92,
-            reason: 'Highest audience retention & excitement peak',
-            tag: 'Key Moment'
-          },
-          {
-            title: '💡 Best Quote / Takeaway',
-            start: Math.floor(total * 0.65),
-            end: Math.floor(total * 0.65) + Math.min(40, Math.floor(total * 0.15)),
-            hookScore: 89,
-            reason: 'Actionable insight and memorable punchline',
-            tag: 'Insight'
-          }
-        ]);
-      }
-    } catch (e: any) {
-      console.error('AI scan error:', e);
-      const total = metadata?.duration || 180;
-      setAiHighlights([
-        {
-          title: '🔥 High-Energy Intro & Hook',
-          start: 0,
-          end: Math.min(45, total),
-          hookScore: 98,
-          reason: 'Opening strong hook with punchy summary',
-          tag: 'Viral Hook'
-        },
-        {
-          title: '⚡ Peak Action / Discussion Point',
-          start: Math.floor(total * 0.3),
-          end: Math.floor(total * 0.3) + 45,
-          hookScore: 94,
-          reason: 'Dynamic audience reaction and core thesis',
-          tag: 'Highlight'
-        },
-        {
-          title: '🎯 Best Punchline & Wrap-up',
-          start: Math.max(0, total - 60),
-          end: total,
-          hookScore: 88,
-          reason: 'Conclusion with high replay value',
-          tag: 'Ending'
-        }
-      ]);
-    } finally {
-      setIsAnalyzing(false);
-    }
-  };
-
   const applyHighlight = (hl: AIHighlight) => {
     setTrimRange([hl.start, hl.end]);
     if (youtubePlayerRef.current) {
@@ -438,36 +465,117 @@ export default function ClipFlowStudio() {
   };
 
   // Export Download
-  const handleExportDownload = async () => {
+  const handleExportDownload = async (forceServerFallback = false) => {
     if (!activeUrl) return;
     setIsDownloading(true);
     setDownloadStatus('running');
-    setStatusMessage('Initiating processing engine...');
+    setStatusMessage('Connecting to ClipFlow Desktop Helper...');
 
     try {
+      const effectiveFormat = downloadFormat === 'captions' ? captionFormat : downloadFormat;
       const payload = {
         url: activeUrl,
-        format: downloadFormat,
+        format: effectiveFormat,
         quality: downloadQuality,
+        subtitleLang: captionLang,
+        relativeTimecodes: true,
         trimStart: trimRange[0],
         trimEnd: trimRange[1],
         aspectRatio: aspectRatio === '16:9' ? undefined : aspectRatio,
         fitMode: fitMode,
+        duration: metadata?.duration || 0,
         customFileName: customFileName || metadata?.title || 'ClipFlow_Video',
       };
 
-      const res = await fetch('http://localhost:3001/api/video/download', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
+      console.log('%c[ClipFlow Studio 🚀 DOWNLOAD TRIGGERED]', 'color: #f59e0b; font-weight: bold;', payload);
 
-      const data = await res.json();
-      if (data.error) throw new Error(data.error);
+      let capturedByHelper = false;
+      if (!forceServerFallback) {
+        // Try 127.0.0.1 first (bypasses Windows IPv6 resolution delay), then localhost
+        for (const endpoint of ['http://127.0.0.1:18942/download', 'http://localhost:18942/download']) {
+          try {
+            console.log(`[ClipFlow Studio 📡 SENDING] POST payload -> ${endpoint}`);
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 3500);
 
-      setGeneratedCommand(data.command || '');
-      setDownloadStatus('success');
-      setStatusMessage('Clip generated! Sent to your Downloads folder.');
+            const helperRes = await fetch(endpoint, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(payload),
+              signal: controller.signal,
+            });
+            clearTimeout(timeoutId);
+
+            if (helperRes.ok) {
+              const resData = await helperRes.json();
+              console.log('%c[ClipFlow Studio ✅ CAPTURED BY DESKTOP HELPER]', 'color: #22c55e; font-weight: bold;', resData);
+              capturedByHelper = true;
+              setDownloadStatus('success');
+              setStatusMessage('Captured by ClipFlow Desktop Helper! Downloading...');
+              setShowAppDownloadModal(false);
+              break;
+            } else {
+              console.warn(`[ClipFlow Studio ⚠️] Helper on ${endpoint} responded with status: ${helperRes.status}`);
+            }
+          } catch (e: any) {
+            console.log(`[ClipFlow Studio ℹ️] Qt Desktop Helper not reachable on ${endpoint} (${e.message})`);
+          }
+        }
+      }
+
+      if (!capturedByHelper) {
+        if (!forceServerFallback) {
+          setShowAppDownloadModal(true);
+          setDownloadStatus('idle');
+          setStatusMessage('ClipFlow Desktop App required for direct PC download.');
+          setIsDownloading(false);
+          return;
+        }
+
+        const res = await fetch('http://localhost:3001/api/video/download', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ...payload, mode: 'server' }),
+        });
+
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+
+        if (data.downloadUrl) {
+          const directUrl = data.downloadUrl.startsWith('http')
+            ? data.downloadUrl
+            : `http://localhost:3001${data.downloadUrl}`;
+          const downloadName = data.fileName || `${customFileName || 'clipflow_clip'}.${effectiveFormat}`;
+          
+          try {
+            const fileRes = await fetch(directUrl, { credentials: 'include' });
+            if (!fileRes.ok) throw new Error(`HTTP ${fileRes.status}`);
+            const blob = await fileRes.blob();
+            const blobUrl = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = blobUrl;
+            a.download = downloadName;
+            a.style.display = 'none';
+            document.body.appendChild(a);
+            a.click();
+            setTimeout(() => {
+              if (document.body.contains(a)) document.body.removeChild(a);
+              window.URL.revokeObjectURL(blobUrl);
+            }, 3000);
+          } catch {
+            const a = document.createElement('a');
+            a.href = directUrl;
+            a.download = downloadName;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+          }
+        }
+
+        setDownloadStatus('success');
+        setStatusMessage('Downloaded directly to your device!');
+        setShowAppDownloadModal(false);
+      }
 
       // Save to recent history
       saveToHistory({
@@ -481,7 +589,7 @@ export default function ClipFlowStudio() {
     } catch (err: any) {
       console.error('[ClipFlow] Download error:', err);
       setDownloadStatus('error');
-      setStatusMessage(err.message || 'Export error. Verify local server & yt-dlp.');
+      setStatusMessage(err.message || 'Export error. Verify processing service.');
     } finally {
       setIsDownloading(false);
     }
@@ -515,35 +623,48 @@ export default function ClipFlowStudio() {
     }
   };
 
-  // Calculate estimated file size
-  const trimDuration = trimRange[1] - trimRange[0];
-  const selectedQualityObj = qualityOptions.find(q => q.label === downloadQuality);
-  const estimatedKbps = selectedQualityObj?.tbr || (downloadQuality === '4k' ? 18000 : downloadQuality === '1080p' ? 4500 : 2500);
-  const estimatedBytes = (estimatedKbps * 1000 / 8) * trimDuration;
+  // Accurate Size calculator
+  const trimDuration = Math.max(0, trimRange[1] - trimRange[0]);
+  let estimatedBytes = 0;
+  if (downloadFormat === 'captions') {
+    // Caption / Transcript text file (~2-8 KB)
+    estimatedBytes = 3500;
+  } else if (downloadFormat === 'mp3') {
+    const kbps = 256; // Standard high-quality MP3 bitrate
+    estimatedBytes = (kbps * 1000 / 8) * trimDuration;
+  } else {
+    // MP4 Video download (bestvideo + bestaudio)
+    const selectedQualityObj = qualityOptions.find(q => q.label === downloadQuality);
+    const height = selectedQualityObj?.height || parseInt((downloadQuality || '').replace(/[^\d]/g, ''), 10) || 1080;
+    
+    let baseKbps = 3800; // default 1080p realistic combined bitrate
+    if (height >= 2160) baseKbps = 20000;
+    else if (height >= 1440) baseKbps = 10000;
+    else if (height >= 1080) baseKbps = 3800;
+    else if (height >= 720) baseKbps = 2200;
+    else if (height >= 480) baseKbps = 1000;
+    else if (height >= 360) baseKbps = 550;
+    else if (height >= 240) baseKbps = 300;
+    else baseKbps = 150;
+
+    const rawTbr = selectedQualityObj?.tbr;
+    const effectiveKbps = (rawTbr && rawTbr > baseKbps) ? (rawTbr + 160) : baseKbps;
+    estimatedBytes = (effectiveKbps * 1000 / 8) * trimDuration;
+  }
 
   return (
-    <div className="min-h-screen bg-[#090d16] text-[#f8fafc] flex flex-col selection:bg-purple-500/30 selection:text-purple-200">
+    <div className="min-h-screen bg-black text-[#f8fafc] flex flex-col selection:bg-purple-500/30 selection:text-purple-200">
       
       {/* ── Top Navigation / Brand Header ───────────────────────────────────── */}
-      <header className="sticky top-0 z-50 border-b border-white/10 bg-[#090d16]/80 backdrop-blur-xl px-6 py-3.5">
+      <header className="sticky top-0 z-50 border-b border-white/10 bg-black/90 backdrop-blur-xl px-6 py-3.5">
         <div className="max-w-7xl mx-auto flex items-center justify-between">
           
           {/* Logo & Slogan */}
           <div className="flex items-center gap-3 cursor-pointer" onClick={() => { setActiveUrl(''); setMetadata(null); }}>
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-purple-500 via-indigo-500 to-pink-500 flex items-center justify-center shadow-lg shadow-purple-500/25 ring-1 ring-white/20">
-              <Scissors className="w-5 h-5 text-white" />
-            </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <span className="text-xl font-extrabold tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-white via-slate-200 to-purple-400">
-                  ClipFlow
-                </span>
-                <span className="px-2 py-0.5 text-[10px] font-bold tracking-wide uppercase rounded-full bg-purple-500/20 text-purple-300 border border-purple-500/30">
-                  AI Studio
-                </span>
-              </div>
-              <p className="text-[11px] text-gray-400 hidden sm:block">AI-Powered Video Clipper & Shorts Generator</p>
-            </div>
+            <img src="/logo.ico" alt="ClipFlow" style={{ width: 40, height: 40, objectFit: 'contain' }} />
+            <span className="text-xl font-extrabold tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-white via-slate-200 to-purple-400">
+              ClipFlow
+            </span>
           </div>
 
           {/* Right Header Status & Tools */}
@@ -572,11 +693,28 @@ export default function ClipFlowStudio() {
             <a
               href="http://localhost:3001/api/video/tools/download-dlp"
               download
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-purple-500/10 hover:bg-purple-500/20 text-xs font-medium text-purple-300 border border-purple-500/20 transition-colors"
-              title="Download FFmpeg + yt-dlp bundle"
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                width: '161px',
+                minWidth: '161px',
+                height: '51px',
+                minHeight: '51px',
+                background: 'linear-gradient(0deg, #FFFFFF 5.29%, #FDDF1F 54.33%)',
+                borderRadius: '4px',
+                fontFamily: "'Iosevka Charon', 'Courier New', monospace",
+                fontWeight: 400,
+                fontSize: '20px',
+                lineHeight: '1',
+                color: '#000000',
+                textDecoration: 'none',
+                whiteSpace: 'nowrap',
+                boxSizing: 'border-box',
+              }}
+              title="Download ClipFlow Processing Engine"
             >
-              <Download className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Engine Bundle</span>
+              Download Engine
             </a>
           </div>
         </div>
@@ -608,7 +746,7 @@ export default function ClipFlowStudio() {
           <div className="max-w-3xl mx-auto">
             <form onSubmit={handleUrlSubmit} className="relative group">
               <div className="absolute -inset-0.5 bg-gradient-to-r from-purple-500 via-pink-500 to-indigo-500 rounded-2xl blur opacity-30 group-hover:opacity-60 transition duration-300" />
-              <div className="relative flex items-center bg-[#0d1424] border border-white/15 rounded-2xl p-2 shadow-2xl">
+              <div className="relative flex items-center bg-[#09090b] border border-white/15 rounded-2xl p-2 shadow-2xl">
                 <div className="pl-3 pr-2 text-gray-400">
                   <YoutubeIcon className="w-6 h-6 text-red-500" />
                 </div>
@@ -731,10 +869,10 @@ export default function ClipFlowStudio() {
                 <a
                   href={`http://localhost:3001/api/video/thumbnail?url=${encodeURIComponent(metadata.thumbnail || '')}&title=${encodeURIComponent(metadata.title || 'thumbnail')}`}
                   download
-                  className="px-3 py-2 rounded-xl bg-white/5 hover:bg-white/10 text-xs font-medium text-gray-300 hover:text-white border border-white/10 transition-colors flex items-center gap-1.5"
+                  className="px-2.5 py-1 rounded-md text-xs font-semibold text-zinc-400 hover:text-white hover:bg-white/10 transition-colors"
+                  title="Download HD Thumbnail"
                 >
-                  <Download className="w-3.5 h-3.5 text-pink-400" />
-                  <span>HD Thumbnail</span>
+                  HD Thumbnail
                 </a>
                 <button
                   onClick={() => {
@@ -768,58 +906,100 @@ export default function ClipFlowStudio() {
                   </div>
 
                   {/* Player Canvas Wrapper */}
-                  <div className="relative aspect-video bg-black rounded-xl overflow-hidden flex items-center justify-center border border-white/10 shadow-inner group">
-                    {youtubeId ? (
-                      <YouTube
-                        videoId={youtubeId}
-                        opts={{
-                          width: '100%',
-                          height: '100%',
-                          playerVars: {
-                            autoplay: 0,
-                            controls: 1,
-                            modestbranding: 1,
-                            rel: 0,
-                            start: trimRange[0],
-                          },
-                        }}
-                        onReady={(e) => {
-                          youtubePlayerRef.current = e.target;
-                        }}
-                        onPlay={() => setIsPlaying(true)}
-                        onPause={() => setIsPlaying(false)}
-                        className="w-full h-full"
-                      />
-                    ) : (
-                      <div className="text-center p-8 text-gray-400">
-                        <FileVideo className="w-12 h-12 mx-auto mb-2 text-purple-400 opacity-60" />
-                        <p className="text-sm font-semibold text-white">Direct / Social Media Stream</p>
-                        <p className="text-xs text-gray-500 mt-1">Ready for high-speed FFmpeg conversion & trimming</p>
-                      </div>
-                    )}
+                  <div className="bg-black/60 rounded-2xl p-2 border border-white/10 flex items-center justify-center overflow-hidden min-h-[300px]">
+                    <div 
+                      className={`relative bg-black rounded-xl overflow-hidden flex items-center justify-center border border-white/15 shadow-2xl transition-all duration-300 ${
+                        aspectRatio === '9:16'
+                          ? 'aspect-[9/16] h-[460px] max-w-[258px] w-full mx-auto'
+                          : aspectRatio === '1:1'
+                          ? 'aspect-square h-[380px] max-w-[380px] w-full mx-auto'
+                          : aspectRatio === '4:5'
+                          ? 'aspect-[4/5] h-[420px] max-w-[336px] w-full mx-auto'
+                          : 'aspect-video w-full'
+                      }`}
+                    >
+                      {youtubeId ? (
+                        <div 
+                          className={`flex items-center justify-center transition-all overflow-hidden ${
+                            fitMode === 'crop' && aspectRatio !== '16:9'
+                              ? 'h-full w-full'
+                              : 'aspect-video w-full my-auto'
+                          }`}
+                        >
+                          <div
+                            className={`flex items-center justify-center ${
+                              fitMode === 'crop' && aspectRatio !== '16:9'
+                                ? 'h-full aspect-video shrink-0 max-w-none'
+                                : 'w-full h-full'
+                            }`}
+                          >
+                            <div className="w-full h-full relative flex items-center justify-center overflow-hidden pointer-events-none select-none">
+                              <YouTube
+                                videoId={youtubeId}
+                                opts={{
+                                  width: '100%',
+                                  height: '100%',
+                                  playerVars: {
+                                    autoplay: 0,
+                                    mute: 1,
+                                    controls: 0,
+                                    disablekb: 1,
+                                    fs: 0,
+                                    modestbranding: 1,
+                                    rel: 0,
+                                    showinfo: 0,
+                                    iv_load_policy: 3,
+                                    cc_load_policy: 0,
+                                    playsinline: 1,
+                                    enablejsapi: 1,
+                                    start: trimRange[0],
+                                  },
+                                }}
+                                onReady={(e) => {
+                                  youtubePlayerRef.current = e.target;
+                                  try {
+                                    if (typeof e.target.unloadModule === 'function') {
+                                      e.target.unloadModule('captions');
+                                      e.target.unloadModule('cc');
+                                    }
+                                  } catch (err) {}
+                                  e.target.mute();
+                                  if (trimRange[0] > 0) {
+                                    e.target.seekTo(trimRange[0], true);
+                                  }
+                                }}
+                                onPlay={() => setIsPlaying(true)}
+                                onPause={() => setIsPlaying(false)}
+                                onStateChange={(e) => {
+                                  if (e.data === 1) {
+                                    setIsPlaying(true);
+                                  } else if (e.data === 2) {
+                                    setIsPlaying(false);
+                                  }
+                                }}
+                                className="w-full h-full flex items-center justify-center pointer-events-none"
+                                iframeClassName="w-full h-full block border-0 pointer-events-none"
+                              />
+                            </div>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="text-center p-8 text-gray-400">
+                          <FileVideo className="w-12 h-12 mx-auto mb-2 text-purple-400 opacity-60" />
+                          <p className="text-sm font-semibold text-white">Direct / Social Media Stream</p>
+                          <p className="text-xs text-gray-500 mt-1">Ready for high-speed conversion & trimming</p>
+                        </div>
+                      )}
 
-                    {/* Aspect Ratio Framing Visual Guide Overlay */}
-                    {aspectRatio === '9:16' && (
-                      <div className="absolute inset-y-0 w-[31.64%] border-2 border-dashed border-purple-400/80 bg-purple-500/10 pointer-events-none flex items-center justify-center">
-                        <span className="bg-black/70 px-2 py-1 rounded text-[10px] font-bold text-purple-300 border border-purple-500/30">
-                          9:16 Shorts Cut
-                        </span>
-                      </div>
-                    )}
-                    {aspectRatio === '1:1' && (
-                      <div className="absolute inset-y-0 w-[56.25%] border-2 border-dashed border-pink-400/80 bg-pink-500/10 pointer-events-none flex items-center justify-center">
-                        <span className="bg-black/70 px-2 py-1 rounded text-[10px] font-bold text-pink-300 border border-pink-500/30">
-                          1:1 Square
-                        </span>
-                      </div>
-                    )}
-                    {aspectRatio === '4:5' && (
-                      <div className="absolute inset-y-0 w-[45%] border-2 border-dashed border-cyan-400/80 bg-cyan-500/10 pointer-events-none flex items-center justify-center">
-                        <span className="bg-black/70 px-2 py-1 rounded text-[10px] font-bold text-cyan-300 border border-cyan-500/30">
-                          4:5 Portrait
-                        </span>
-                      </div>
-                    )}
+                      {/* Aspect Ratio Badge Overlay */}
+                      {aspectRatio !== '16:9' && (
+                        <div className="absolute top-2 left-2 z-10 pointer-events-none">
+                          <span className="bg-black/80 px-2 py-0.5 rounded text-[10px] font-bold text-purple-300 border border-purple-500/30">
+                            {aspectRatio} {fitMode === 'pad' ? 'Letterbox (Top & Bottom Black)' : 'Full Crop'}
+                          </span>
+                        </div>
+                      )}
+                    </div>
                   </div>
 
                   {/* Precision Multi-Track Scrubber */}
@@ -836,11 +1016,11 @@ export default function ClipFlowStudio() {
                             const val = parseTime(e.target.value);
                             if (!isNaN(val) && val < trimRange[1]) setTrimRange([val, trimRange[1]]);
                           }}
-                          className="w-16 bg-black/40 border border-white/10 rounded px-1.5 py-0.5 text-center text-purple-300 font-semibold focus:outline-none focus:border-purple-500"
+                          className="w-16 bg-black/40 border border-white/10 rounded px-1.5 py-0.5 text-center text-zinc-200 font-bold focus:outline-none focus:border-zinc-400"
                         />
                       </div>
                       <div className="flex items-center gap-1.5 text-gray-300">
-                        <Clock className="w-3.5 h-3.5 text-purple-400" />
+                        <Clock className="w-3.5 h-3.5 text-zinc-400" />
                         <span className="font-semibold text-white">{formatTime(trimRange[1] - trimRange[0])} Selected</span>
                       </div>
                       <div className="flex items-center gap-2">
@@ -852,13 +1032,49 @@ export default function ClipFlowStudio() {
                             const val = parseTime(e.target.value);
                             if (!isNaN(val) && val > trimRange[0]) setTrimRange([trimRange[0], Math.min(metadata.duration || 9999, val)]);
                           }}
-                          className="w-16 bg-black/40 border border-white/10 rounded px-1.5 py-0.5 text-center text-pink-300 font-semibold focus:outline-none focus:border-pink-500"
+                          className="w-16 bg-black/40 border border-white/10 rounded px-1.5 py-0.5 text-center text-zinc-200 font-bold focus:outline-none focus:border-zinc-400"
                         />
                       </div>
                     </div>
 
-                    {/* Dual Range Scrubber Slider */}
+                    {/* Dual Range Scrubber Slider with Time-Based Frames */}
                     <div className="relative py-2 px-1" ref={sliderWrapRef}>
+                      {/* Filmstrip frame strip background */}
+                      <div className="mb-2 h-12 rounded-lg overflow-hidden border border-white/10 bg-black/60 flex relative shadow-inner">
+                        {Array.from({ length: 8 }).map((_, i) => {
+                          const totalDur = metadata.duration || 120;
+                          const frameTimeSec = Math.round((totalDur / 8) * (i + 0.5));
+                          const timeStr = formatTime(frameTimeSec);
+
+                          const ytSlot = i < 2 ? '1' : i < 6 ? '2' : '3';
+                          const ytFallback = youtubeId
+                            ? `https://img.youtube.com/vi/${youtubeId}/${ytSlot}.jpg`
+                            : metadata.thumbnail || '';
+                          const frameUrl = ytFallback;
+
+                          return (
+                            <div
+                              key={i}
+                              className="relative h-full flex-1 border-r border-white/5 bg-zinc-950/80 overflow-hidden group"
+                            >
+                              <img
+                                src={frameUrl}
+                                onError={(e) => {
+                                  if (e.currentTarget.src !== ytFallback && ytFallback) {
+                                    e.currentTarget.src = ytFallback;
+                                  }
+                                }}
+                                className="h-full w-full object-cover opacity-50 group-hover:opacity-80 transition-opacity"
+                                alt={`Frame at ${timeStr}`}
+                              />
+                              <span className="absolute bottom-0.5 right-1 text-[7.5px] font-mono font-bold text-white/80 bg-black/75 backdrop-blur-xs px-1 py-0.2 rounded border border-white/10 pointer-events-none select-none">
+                                {timeStr}
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+
                       <Slider.Root
                         className="slider-root"
                         value={trimRange}
@@ -908,7 +1124,7 @@ export default function ClipFlowStudio() {
                           onClick={() => {
                             if (currentTime < trimRange[1]) setTrimRange([currentTime, trimRange[1]]);
                           }}
-                          className="px-2 py-1 rounded bg-purple-500/20 text-purple-300 hover:bg-purple-500/30 transition-colors font-medium"
+                          className="px-2 py-1 rounded bg-white/10 text-zinc-200 hover:bg-white/20 transition-colors font-medium"
                           title="Set Start to current playhead"
                         >
                           [ Set In
@@ -922,7 +1138,7 @@ export default function ClipFlowStudio() {
                           onClick={() => {
                             if (currentTime > trimRange[0]) setTrimRange([trimRange[0], currentTime]);
                           }}
-                          className="px-2 py-1 rounded bg-pink-500/20 text-pink-300 hover:bg-pink-500/30 transition-colors font-medium"
+                          className="px-2 py-1 rounded bg-white/10 text-zinc-200 hover:bg-white/20 transition-colors font-medium"
                           title="Set End to current playhead"
                         >
                           Set Out ]
@@ -980,51 +1196,45 @@ export default function ClipFlowStudio() {
                 </div>
 
                 {/* ── AI Viral Highlights & Moments Engine ─────────────────── */}
-                <div className="glass-panel rounded-2xl p-6 space-y-4 relative overflow-hidden">
+                <div className="glass-panel rounded-2xl p-6 space-y-4 relative overflow-hidden border border-purple-500/20 bg-gradient-to-br from-purple-900/10 via-black/40 to-black/60">
                   <div className="absolute top-0 right-0 w-64 h-64 bg-gradient-to-bl from-purple-500/10 via-pink-500/5 to-transparent pointer-events-none rounded-full blur-2xl" />
                   
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <div className="p-2 rounded-xl bg-purple-500/20 text-purple-400 border border-purple-500/30">
+                  <div className="flex items-center justify-between gap-4">
+                    <div className="flex items-center gap-2.5">
+                      <div className="p-2 rounded-xl bg-purple-500/15 text-purple-400 border border-purple-500/25">
                         <Sparkles className="w-5 h-5" />
                       </div>
                       <div>
-                        <h3 className="font-bold text-white text-base">AI Viral Clips & Hook Scanner</h3>
+                        <div className="flex items-center gap-2">
+                          <h3 className="font-bold text-white text-base">AI Viral Clips & Hook Scanner</h3>
+                          <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold uppercase tracking-wider bg-amber-500/15 text-amber-300 border border-amber-500/30">
+                            Coming Soon
+                          </span>
+                        </div>
                         <p className="text-xs text-gray-400">Scan video transcript & audio for high-retention viral segments</p>
                       </div>
                     </div>
 
                     <button
-                      onClick={handleRunAiAnalysis}
-                      disabled={isAnalyzing}
-                      className="flex items-center gap-2 px-4 py-2 rounded-xl bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-500 hover:to-pink-500 text-white font-semibold text-xs shadow-lg shadow-purple-500/20 transition-all disabled:opacity-50"
+                      type="button"
+                      disabled={true}
+                      className="flex items-center gap-2 px-4 py-2 rounded-xl bg-white/5 border border-white/10 text-gray-400 font-semibold text-xs shadow-none cursor-not-allowed opacity-60"
+                      title="Coming Soon in next update"
                     >
-                      {isAnalyzing ? (
-                        <>
-                          <motion.div
-                            animate={{ rotate: 360 }}
-                            transition={{ repeat: Infinity, duration: 1, ease: 'linear' }}
-                            className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full"
-                          />
-                          <span>Scanning Video...</span>
-                        </>
-                      ) : (
-                        <>
-                          <Zap className="w-3.5 h-3.5" />
-                          <span>Find Viral Clips</span>
-                        </>
-                      )}
+                      <Lock className="w-3.5 h-3.5 text-amber-400" />
+                      <span>Find Viral Clips</span>
                     </button>
                   </div>
 
-                  {/* Optional Custom AI Prompt */}
-                  <div className="flex items-center gap-2">
+                  {/* Disabled Custom AI Prompt Box */}
+                  <div className="relative">
                     <input
                       type="text"
-                      value={aiCustomPrompt}
-                      onChange={(e) => setAiCustomPrompt(e.target.value)}
-                      placeholder="Optional custom instruction (e.g. 'Find the funniest joke' or 'Key tips')..."
-                      className="w-full bg-black/30 border border-white/10 rounded-xl px-3 py-2 text-xs text-white placeholder-gray-500 focus:outline-none focus:border-purple-500"
+                      disabled={true}
+                      readOnly={true}
+                      value=""
+                      placeholder="🔒 AI transcript & viral moment scanner is coming soon in the next update..."
+                      className="w-full bg-black/40 border border-white/10 rounded-xl px-3.5 py-2.5 text-xs text-gray-500 placeholder-gray-500 cursor-not-allowed select-none focus:outline-none"
                     />
                   </div>
 
@@ -1153,17 +1363,21 @@ export default function ClipFlowStudio() {
                   {/* Format & Resolution Pickers */}
                   <div className="space-y-3">
                     <div className="flex items-center gap-2">
-                      {['mp4', 'mp3', 'wav'].map((fmt) => (
+                      {[
+                        { id: 'mp4', label: '🎬 MP4 Video' },
+                        { id: 'mp3', label: '🎵 MP3 Audio' },
+                        { id: 'captions', label: '💬 Captions' },
+                      ].map((f) => (
                         <button
-                          key={fmt}
-                          onClick={() => setDownloadFormat(fmt as any)}
-                          className={`flex-1 py-2 rounded-xl text-xs font-bold uppercase tracking-wider border transition-all ${
-                            downloadFormat === fmt
+                          key={f.id}
+                          onClick={() => setDownloadFormat(f.id as any)}
+                          className={`flex-1 py-2.5 rounded-xl text-xs font-bold border transition-all ${
+                            downloadFormat === f.id
                               ? 'bg-purple-600 border-purple-500 text-white shadow-lg shadow-purple-600/20'
                               : 'bg-black/30 border-white/10 text-gray-400 hover:text-white'
                           }`}
                         >
-                          {fmt === 'mp4' ? '🎬 MP4 Video' : fmt === 'mp3' ? '🎵 MP3 Audio' : '🎙️ WAV Audio'}
+                          {f.label}
                         </button>
                       ))}
                     </div>
@@ -1189,6 +1403,60 @@ export default function ClipFlowStudio() {
                       </div>
                     )}
 
+                    {downloadFormat === 'captions' && (
+                      <div className="space-y-3 bg-purple-950/20 border border-purple-500/20 rounded-xl p-3">
+                        <div className="space-y-1.5">
+                          <label className="text-xs font-semibold text-gray-300">Subtitle Format</label>
+                          <div className="grid grid-cols-3 gap-2">
+                            {[
+                              { id: 'srt', label: 'SRT (SubRip)', desc: 'CapCut / Premiere' },
+                              { id: 'vtt', label: 'VTT (WebVTT)', desc: 'Web Players' },
+                              { id: 'txt', label: 'TXT (Text)', desc: 'Plain Transcript' },
+                            ].map((s) => (
+                              <button
+                                key={s.id}
+                                type="button"
+                                onClick={() => setCaptionFormat(s.id as any)}
+                                className={`py-2 px-1.5 rounded-xl border text-center transition-all ${
+                                  captionFormat === s.id
+                                    ? 'bg-gradient-to-r from-purple-600 to-indigo-600 border-purple-400 text-white shadow-md'
+                                    : 'bg-black/40 border-white/10 text-gray-400 hover:text-white'
+                                }`}
+                              >
+                                <div className="text-xs font-bold uppercase">{s.id}</div>
+                                <div className="text-[9px] text-purple-200/70 font-medium truncate">{s.desc}</div>
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+
+                        <div className="pt-1 space-y-2">
+                          <div className="space-y-1">
+                            <label className="text-[11px] font-semibold text-gray-400">Language</label>
+                            <select
+                              value={captionLang}
+                              onChange={(e) => setCaptionLang(e.target.value)}
+                              className="w-full bg-black/50 border border-white/10 rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-purple-500 font-medium"
+                            >
+                              <option value="en">English (Default)</option>
+                              <option value="auto">Auto-Generated</option>
+                              <option value="ko">Korean (한국어)</option>
+                              <option value="es">Spanish (Español)</option>
+                              <option value="ja">Japanese (日本語)</option>
+                              <option value="zh">Chinese (中文)</option>
+                              <option value="hi">Hindi (हिन्दी)</option>
+                              <option value="fr">French (Français)</option>
+                              <option value="de">German (Deutsch)</option>
+                            </select>
+                          </div>
+                          <div className="text-[10px] text-purple-300/80 bg-purple-500/10 border border-purple-500/20 rounded-lg p-2 flex items-center gap-1.5">
+                            <span>⏱️</span>
+                            <span>Auto-trimmed to your timeline [{formatTime(trimRange[0])} - {formatTime(trimRange[1])}] & starts at 00:00:00.</span>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
                     {/* Custom File Name */}
                     <div className="space-y-1.5 pt-1">
                       <label className="text-xs font-semibold text-gray-400">File Name</label>
@@ -1205,7 +1473,7 @@ export default function ClipFlowStudio() {
                   {/* Primary Download / Export Action */}
                   <div className="space-y-3 pt-2">
                     <button
-                      onClick={handleExportDownload}
+                      onClick={() => handleExportDownload(false)}
                       disabled={isDownloading}
                       className="w-full py-3.5 rounded-xl bg-gradient-to-r from-purple-600 via-pink-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white font-bold text-sm shadow-xl shadow-purple-600/30 transition-all flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed group"
                     >
@@ -1221,7 +1489,7 @@ export default function ClipFlowStudio() {
                       ) : (
                         <>
                           <Download className="w-5 h-5 group-hover:-translate-y-0.5 transition-transform" />
-                          <span>Export & Download to PC</span>
+                          <span>Download</span>
                         </>
                       )}
                     </button>
@@ -1250,30 +1518,7 @@ export default function ClipFlowStudio() {
                       </motion.div>
                     )}
 
-                    {/* Power User FFmpeg Copy Tool */}
-                    {generatedCommand && (
-                      <div className="p-3 rounded-xl bg-black/40 border border-white/10 space-y-2">
-                        <div className="flex items-center justify-between text-[11px] text-gray-400">
-                          <span className="flex items-center gap-1 font-mono">
-                            <Terminal className="w-3 h-3 text-purple-400" /> CLI Command
-                          </span>
-                          <button
-                            onClick={() => {
-                              navigator.clipboard.writeText(generatedCommand);
-                              setCopiedCmd(true);
-                              setTimeout(() => setCopiedCmd(false), 2000);
-                            }}
-                            className="text-purple-400 hover:text-purple-300 flex items-center gap-1 transition-colors"
-                          >
-                            {copiedCmd ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
-                            <span>{copiedCmd ? 'Copied' : 'Copy'}</span>
-                          </button>
-                        </div>
-                        <pre className="text-[10px] font-mono text-gray-300 bg-black/60 p-2 rounded overflow-x-auto max-h-20 select-all">
-                          {generatedCommand}
-                        </pre>
-                      </div>
-                    )}
+                    {/* End Download actions */}
                   </div>
                 </div>
 
@@ -1329,15 +1574,15 @@ export default function ClipFlowStudio() {
               )}
             </div>
 
-            {/* 3-Pillar Feature Showcase Cards */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6 max-w-5xl mx-auto">
+            {/* ── Feature Highlights Grid ────────────────────────────────────────── */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 pt-4">
               {[
                 {
                   icon: Sparkles,
-                  title: 'AI Hook Detection',
-                  desc: 'Gemini AI automatically scans transcriptions and audio dynamics to isolate the highest-converting moments.',
+                  title: 'Exact Sub-Second Trimming',
+                  desc: 'Cut directly from any start time to end time with instant browser preview. No bloated downloads or unwanted video sections.',
                   color: 'from-purple-500 to-indigo-500',
-                  badge: 'Smart Engine'
+                  badge: 'Interactive'
                 },
                 {
                   icon: Layers,
@@ -1349,7 +1594,7 @@ export default function ClipFlowStudio() {
                 {
                   icon: ShieldCheck,
                   title: 'Lossless Local Speed',
-                  desc: 'Powered directly by local FFmpeg & yt-dlp. No server compression limits, zero watermarks, and full 4K output.',
+                  desc: 'Powered by high-performance hardware acceleration. No server compression limits, zero watermarks, and full 4K output.',
                   color: 'from-cyan-500 to-blue-500',
                   badge: '100% Free & Local'
                 }
@@ -1462,7 +1707,7 @@ export default function ClipFlowStudio() {
       </AnimatePresence>
 
       {/* ── Footer ─────────────────────────────────────────────────────────── */}
-      <footer className="border-t border-white/10 bg-[#090d16]/90 py-6 px-6 text-center text-xs text-gray-500 mt-12">
+      <footer className="border-t border-white/10 bg-black/95 py-6 px-6 text-center text-xs text-gray-500 mt-12">
         <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-4">
           <div className="flex items-center gap-2">
             <div className="w-5 h-5 rounded bg-purple-500/20 flex items-center justify-center">
@@ -1472,10 +1717,83 @@ export default function ClipFlowStudio() {
             <span>— Free & Open Video Repurposing</span>
           </div>
           <p className="text-gray-600 text-[11px]">
-            Direct FFmpeg & yt-dlp Engine • Local Processing • Zero Watermarks
+            Direct High-Speed Engine • Local Processing • Zero Watermarks
           </p>
         </div>
       </footer>
+
+      {/* ── ClipFlow Desktop App Required Modal ──────────────────────────────── */}
+      {showAppDownloadModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-md animate-in fade-in duration-200">
+          <div className="bg-[#0c0c0f] border border-purple-500/30 w-full max-w-md rounded-3xl p-6 sm:p-7 shadow-[0_0_50px_rgba(168,85,247,0.2)] relative space-y-5">
+            {/* Close Button */}
+            <button
+              onClick={() => setShowAppDownloadModal(false)}
+              className="absolute top-4 right-4 p-2 text-gray-400 hover:text-white hover:bg-white/10 rounded-full transition-colors"
+              title="Close"
+            >
+              <X className="w-4 h-4" />
+            </button>
+
+            {/* Header / Icon */}
+            <div className="flex items-start gap-4">
+              <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-purple-500/20 to-pink-500/20 border border-purple-500/40 flex items-center justify-center shrink-0 shadow-lg shadow-purple-500/20">
+                <Monitor className="w-6 h-6 text-purple-400" />
+              </div>
+              <div className="space-y-1">
+                <h3 className="text-lg font-bold text-white leading-tight">ClipFlow Desktop App Required</h3>
+                <p className="text-xs text-gray-400 leading-relaxed">
+                  The lightweight 1:1 floating companion app must be running on your PC to download and auto-crop clips without terminal popups.
+                </p>
+              </div>
+            </div>
+
+            {/* Feature Highlights */}
+            <div className="p-3.5 bg-black/40 border border-white/10 rounded-2xl space-y-2 text-xs text-gray-300">
+              <div className="flex items-center gap-2">
+                <Check className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                <span>1:1 Floating Circular Progress Widget</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <Check className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                <span>Automatic 9:16 / 1:1 / 4:5 Smart Cropping</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <Check className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                <span>Auto file numbering <span className="font-mono text-purple-300">(1), (2)</span> for duplicates</span>
+              </div>
+            </div>
+
+            {/* Actions */}
+            <div className="space-y-2.5 pt-1">
+              <a
+                href="http://localhost:3001/api/video/tools/download-dlp"
+                download
+                className="w-full py-3 rounded-xl bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-500 hover:to-pink-500 text-white font-bold text-xs flex items-center justify-center gap-2 shadow-lg shadow-purple-500/25 transition-all"
+              >
+                <Download className="w-4 h-4" />
+                <span>Download ClipFlow Desktop Companion</span>
+              </a>
+
+              <div className="flex gap-2">
+                <button
+                  onClick={() => handleExportDownload(false)}
+                  className="flex-1 py-2.5 rounded-xl bg-white/10 hover:bg-white/15 border border-white/15 text-white font-semibold text-xs flex items-center justify-center gap-1.5 transition-colors"
+                >
+                  <RefreshCw className="w-3.5 h-3.5 text-purple-400" />
+                  <span>I've Started App (Retry)</span>
+                </button>
+                <button
+                  onClick={() => handleExportDownload(true)}
+                  className="py-2.5 px-3 rounded-xl bg-black/40 hover:bg-white/5 border border-white/10 text-gray-400 hover:text-gray-200 text-xs transition-colors"
+                >
+                  Server Fallback
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
     </div>
   );

@@ -2,6 +2,20 @@ import ffmpeg from 'fluent-ffmpeg';
 import fs from 'fs';
 import path from 'path';
 
+function resolveFfmpegBinary(): string {
+  const candidates = [
+    path.join(process.cwd(), 'backend', 'ffmpeg.exe'),
+    path.join(process.cwd(), 'ffmpeg.exe'),
+    path.join(process.cwd(), 'qt-app', 'bin', 'ffmpeg.exe'),
+  ];
+  for (const c of candidates) {
+    if (fs.existsSync(c)) return c;
+  }
+  return 'ffmpeg';
+}
+
+ffmpeg.setFfmpegPath(resolveFfmpegBinary());
+
 const TEMP_DIR = path.join(process.cwd(), 'temp');
 
 // Ensure temp dir exists

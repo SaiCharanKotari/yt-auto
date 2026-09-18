@@ -3,9 +3,9 @@
 @theme {
   --color-primary: #8b5cf6;
   --color-primary-hover: #7c3aed;
-  --color-background: #090d16;
-  --color-surface: #0f172a;
-  --color-surface-hover: #1e293b;
+  --color-background: #000000;
+  --color-surface: #0a0a0c;
+  --color-surface-hover: #141418;
   --color-foreground: #f8fafc;
   --color-accent-cyan: #06b6d4;
   --color-accent-pink: #ec4899;
@@ -31,17 +31,17 @@ body {
 }
 
 ::-webkit-scrollbar-track {
-  background: #090d16;
+  background: #000000;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #1e293b;
+  background: #18181b;
   border-radius: 4px;
   border: 1px solid rgba(255, 255, 255, 0.05);
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #334155;
+  background: #27272a;
 }
 
 /* Radix Slider custom handle styles */
@@ -64,7 +64,7 @@ body {
 
 .slider-range {
   position: absolute;
-  background: linear-gradient(90deg, #8b5cf6, #ec4899);
+  background: #e4e4e7;
   border-radius: 9999px;
   height: 100%;
 }
@@ -74,7 +74,7 @@ body {
   width: 18px;
   height: 18px;
   background-color: white;
-  box-shadow: 0 0 12px rgba(139, 92, 246, 0.8), 0 2px 4px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 0 10px rgba(255, 255, 255, 0.4), 0 2px 4px rgba(0, 0, 0, 0.5);
   border-radius: 9999px;
   transition: transform 0.15s ease, box-shadow 0.15s ease;
   cursor: grab;
@@ -82,7 +82,7 @@ body {
 
 .slider-thumb:hover {
   transform: scale(1.2);
-  box-shadow: 0 0 18px rgba(139, 92, 246, 1), 0 2px 6px rgba(0, 0, 0, 0.6);
+  box-shadow: 0 0 14px rgba(255, 255, 255, 0.8), 0 2px 6px rgba(0, 0, 0, 0.6);
 }
 
 .slider-thumb:active {

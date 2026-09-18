@@ -181,7 +181,7 @@ export default function ClipFlow() {
              <AlertCircle className="text-blue-400 w-6 h-6 flex-shrink-0" />
              <div>
                <h3 className="text-blue-100 font-semibold mb-1">Local Processing</h3>
-               <p className="text-blue-200/70 text-sm">Clip Flow relies on local FFmpeg execution. Ensure your machine stays powered on during active workflows.</p>
+                <p className="text-blue-200/70 text-sm">Clip Flow relies on local engine processing. Ensure your machine stays powered on during active workflows.</p>
              </div>
           </div>
         </div>
