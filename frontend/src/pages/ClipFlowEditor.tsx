@@ -30,7 +30,14 @@ import { CropFrameOverlay, type CropBox } from '../components/CropFrameOverlay';
 import { useTwitchPreview } from '../components/Twitch/useTwitchPreview';
 import { useTwitchLiveChannel, isTwitchLiveChannelUrl } from '../components/Twitch/useTwitchLiveChannel';
 import { getCachedMetadata, setCachedMetadata, clearCachedMetadata } from '../utils/metadataCache';
-import { getEditorSession, saveEditorSession, clearEditorSession } from '../utils/editorSession';
+import {
+  getEditorSession,
+  saveEditorSession,
+  clearEditorSession,
+  type ProcessingMode,
+  getStoredProcessingMode,
+  setStoredProcessingMode,
+} from '../utils/editorSession';
 import { detectPlatform, extractYouTubeId } from '../utils/platforms';
 
 // Use real server URL from env if deployed, otherwise fallback to localhost for dev
@@ -127,8 +134,37 @@ export default function ClipFlowEditor() {
 
   const engineParam = searchParams.get('engine');
   const modeParam = searchParams.get('mode');
-  const isProUser = Boolean(isPro || modeParam === 'pro' || engineParam === 'server');
-  const exportMode: 'free' | 'pro' = isProUser ? 'pro' : 'free';
+
+  // Single Authoritative Processing Mode: 'free' | 'pro'
+  const initialProcessingMode: ProcessingMode = useMemo(() => {
+    // 1. Explicit query param in URL (?mode=free | ?mode=pro | ?engine=local | ?engine=server)
+    if (modeParam === 'pro' || engineParam === 'server') return 'pro';
+    if (modeParam === 'free' || engineParam === 'local') return 'free';
+
+    // 2. Existing editor session state for this URL
+    if (initialSession?.processingMode) return initialSession.processingMode;
+    if (initialSession?.exportMode) return initialSession.exportMode;
+
+    // 3. Stored mode in sessionStorage
+    const stored = getStoredProcessingMode();
+    if (stored) return stored;
+
+    // 4. Default: Pro account gets pro, free account gets free
+    return isPro ? 'pro' : 'free';
+  }, [modeParam, engineParam, initialSession?.processingMode, initialSession?.exportMode, isPro]);
+
+  const [processingMode, setProcessingMode] = useState<ProcessingMode>(initialProcessingMode);
+  const isProUser = processingMode === 'pro';
+  const exportMode: 'free' | 'pro' = processingMode;
+  const useLocalProcessing = processingMode === 'free';
+  void useLocalProcessing;
+  void setProcessingMode;
+
+  // Persist processing mode immediately
+  useEffect(() => {
+    setStoredProcessingMode(processingMode);
+    console.log(`%c[ClipFlow] Processing Mode: ${processingMode.toUpperCase()}`, 'color: #38bdf8; font-weight: bold; font-size: 12px;');
+  }, [processingMode]);
 
   const platformInfo = useMemo(() => {
     return detectPlatform(activeUrl || metadata?.webpage_url || metadata?.url || '');
@@ -965,17 +1001,14 @@ export default function ClipFlowEditor() {
       }
       console.log('%c[ClipFlow Web 📡 METADATA NETWORK REQUEST]', 'color: #38bdf8; font-weight: bold;', { targetUrl });
 
-      // 1. Try Desktop Helper App (port 18942) if running, otherwise backend
-      const endpoints = isHelperRunning
-        ? ['http://127.0.0.1:18942/metadata', `${BACKEND_URL}/api/video/metadata`]
-        : [`${BACKEND_URL}/api/video/metadata`, 'http://127.0.0.1:18942/metadata'];
-
-      for (const endpoint of endpoints) {
+      // Route metadata strictly based on authoritative processingMode
+      if (processingMode === 'free') {
+        // FREE MODE: Exclusively Desktop Helper App (port 18942)
+        const endpoint = 'http://127.0.0.1:18942/metadata';
         try {
-          console.log(`[ClipFlow Web] Querying metadata from: ${endpoint}`);
+          console.log(`[ClipFlow Web 💻 FREE] Querying metadata from local helper: ${endpoint}`);
           const controller = new AbortController();
-          const isHelper = endpoint.includes('18942');
-          const timeoutId = setTimeout(() => controller.abort(), isHelper ? 1500 : 25000);
+          const timeoutId = setTimeout(() => controller.abort(), 3500);
           const res = await fetch(endpoint, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -988,22 +1021,55 @@ export default function ClipFlowEditor() {
             const json = await res.json();
             if (json && !json.error && (json.title || json.id)) {
               data = json;
-              console.log('%c[ClipFlow Web METADATA SUCCESS]', 'color: #22c55e; font-weight: bold;', {
+              setIsHelperRunning(true);
+              console.log('%c[ClipFlow Web METADATA SUCCESS (LOCAL)]', 'color: #22c55e; font-weight: bold;', {
                 endpoint,
                 title: json.title,
                 duration: json.duration_string || json.duration,
                 formatsCount: json.formats?.length || 0,
               });
-              break;
             }
           } else {
             const errJson = await res.json().catch(() => null);
-            if (errJson?.error) {
-              lastErrorMessage = errJson.error;
-            }
+            if (errJson?.error) lastErrorMessage = errJson.error;
           }
         } catch (e: any) {
-          console.warn(`[ClipFlow Web] Endpoint ${endpoint} unreachable: ${e.message}`);
+          console.warn(`[ClipFlow Web 💻 FREE] Desktop Helper unreachable at ${endpoint}: ${e.message}`);
+          setIsHelperRunning(false);
+          lastErrorMessage = 'ClipFlow Desktop Helper is offline. Please launch the Helper app.';
+        }
+      } else {
+        // PRO MODE: Exclusively ClipFlow Backend Server
+        const endpoint = `${BACKEND_URL}/api/video/metadata`;
+        try {
+          console.log(`[ClipFlow Web ⚡ PRO] Querying metadata from server: ${endpoint}`);
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 25000);
+          const res = await fetch(endpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url: targetUrl }),
+            signal: controller.signal,
+          });
+          clearTimeout(timeoutId);
+
+          if (res.ok) {
+            const json = await res.json();
+            if (json && !json.error && (json.title || json.id)) {
+              data = json;
+              console.log('%c[ClipFlow Web METADATA SUCCESS (SERVER)]', 'color: #22c55e; font-weight: bold;', {
+                endpoint,
+                title: json.title,
+                duration: json.duration_string || json.duration,
+                formatsCount: json.formats?.length || 0,
+              });
+            }
+          } else {
+            const errJson = await res.json().catch(() => null);
+            if (errJson?.error) lastErrorMessage = errJson.error;
+          }
+        } catch (e: any) {
+          console.warn(`[ClipFlow Web ⚡ PRO] Server unreachable at ${endpoint}: ${e.message}`);
           if (!lastErrorMessage && e.name !== 'AbortError') {
             lastErrorMessage = e.message;
           }
@@ -1833,7 +1899,7 @@ export default function ClipFlowEditor() {
           setDriveSuccessLink(null);
         }, 2000);
       } else {
-        // Free Mode: Try Desktop Helper App (port 18942) first, then fallback to backend
+        // Free Mode: Exclusively Desktop Helper App (port 18942)
         console.log('%c═══════════════════════════════════════════════════', 'color: #38bdf8;');
         console.log('%c[ClipFlow Studio 🚀 FREE LOCAL DOWNLOAD INITIATED]', 'color: #38bdf8; font-weight: bold; font-size: 13px;', payload);
         console.log('%c═══════════════════════════════════════════════════', 'color: #38bdf8;');
@@ -1875,45 +1941,11 @@ export default function ClipFlowEditor() {
         }
 
         if (!capturedByHelper) {
-          console.log('%c[ClipFlow Studio 🌐 DESKTOP APP OFFLINE -> FALLBACK TO BACKEND SERVER]', 'color: #f59e0b; font-weight: bold;');
-          setStatusMessage('Processing clip on server for browser download...');
-          const clientJobId = crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2);
-          setCloudJobId(clientJobId);
-
-          const res = await fetch(`${BACKEND_URL}/api/video/download`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ ...payload, mode: 'server', clientJobId }),
-          });
-
-          const data = await res.json();
-          if (data.error) throw new Error(data.error);
-
-          console.log('%c[ClipFlow Studio 🌐 SERVER DOWNLOAD COMPLETED]', 'color: #22c55e; font-weight: bold;', data);
-
-          if (data.downloadUrl) {
-            setCloudJobId(null);
-            const directUrl = data.downloadUrl.startsWith('http')
-              ? data.downloadUrl
-              : `${BACKEND_URL}${data.downloadUrl}`;
-
-            const downloadName = data.fileName || (downloadFormat === 'captions' ? `clipflow_captions.${captionFormat}` : 'clipflow_clip.mp4');
-            await triggerBrowserFileDownload(directUrl, downloadName);
-
-            setDownloadStatus('success');
-            setStatusMessage('Downloaded directly to your device!');
-            setTimeout(() => {
-              setStatusMessage('');
-              setDownloadStatus('idle');
-            }, 2000);
-          } else {
-            setDownloadStatus('success');
-            setStatusMessage('Processing complete!');
-            setTimeout(() => {
-              setStatusMessage('');
-              setDownloadStatus('idle');
-            }, 2000);
-          }
+          console.warn('%c[ClipFlow Studio 💻 FREE MODE: DESKTOP APP OFFLINE]', 'color: #ef4444; font-weight: bold;');
+          setIsHelperRunning(false);
+          setDownloadStatus('error');
+          setStatusMessage('ClipFlow Desktop App is not running. Please launch the Helper app for local processing.');
+          setShowCompanionModal(true);
         }
       }
 

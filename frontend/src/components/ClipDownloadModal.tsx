@@ -3,6 +3,8 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { X, Zap, HardDrive, ArrowRight } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 
+import { setStoredProcessingMode } from '../utils/editorSession';
+
 interface ClipDownloadModalProps {
   isOpen: boolean;
   onClose: () => void;
@@ -33,9 +35,10 @@ export function ClipDownloadModal({
 
   const handleProceedFree = () => {
     if (!videoUrl.trim()) return;
+    setStoredProcessingMode('free');
     onClose();
     window.open(
-      `/editor/studio?url=${encodeURIComponent(videoUrl.trim())}&engine=local`,
+      `/editor/studio?url=${encodeURIComponent(videoUrl.trim())}&mode=free&engine=local`,
       '_blank',
       'noopener,noreferrer'
     );
@@ -48,9 +51,10 @@ export function ClipDownloadModal({
       onOpenAuthModal();
       return;
     }
+    setStoredProcessingMode('pro');
     onClose();
     window.open(
-      `/editor/studio?url=${encodeURIComponent(videoUrl.trim())}&engine=server&mode=pro`,
+      `/editor/studio?url=${encodeURIComponent(videoUrl.trim())}&mode=pro&engine=server`,
       '_blank',
       'noopener,noreferrer'
     );

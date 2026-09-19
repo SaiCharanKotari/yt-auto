@@ -1,3 +1,23 @@
+export type ProcessingMode = 'free' | 'pro';
+
+export const PROCESSING_MODE_STORAGE_KEY = 'clipflow_processing_mode';
+
+export function setStoredProcessingMode(mode: ProcessingMode) {
+  try {
+    sessionStorage.setItem(PROCESSING_MODE_STORAGE_KEY, mode);
+  } catch {}
+}
+
+export function getStoredProcessingMode(): ProcessingMode | null {
+  try {
+    const stored = sessionStorage.getItem(PROCESSING_MODE_STORAGE_KEY);
+    if (stored === 'free' || stored === 'pro') return stored;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 export interface EditorSessionState {
   activeUrl: string;
   metadata: any;
@@ -14,6 +34,7 @@ export interface EditorSessionState {
   downloadAudioBitrate: string;
   customFileName: string;
   exportMode: 'free' | 'pro';
+  processingMode: ProcessingMode;
   selectedPreviewQualityUrl?: string;
   videoHeight?: number;
   rightPanelWidth?: number;
@@ -30,7 +51,11 @@ const SESSION_KEY = 'clipflow_active_editor_session';
 export function saveEditorSession(state: Partial<EditorSessionState>) {
   try {
     if (!state.activeUrl) return;
+    if (state.processingMode) {
+      setStoredProcessingMode(state.processingMode);
+    }
     const existing = getEditorSession();
+    const mode = state.processingMode || state.exportMode || existing?.processingMode || getStoredProcessingMode() || 'free';
     const merged: EditorSessionState = {
       ...(existing || {
         activeUrl: state.activeUrl,
@@ -47,10 +72,13 @@ export function saveEditorSession(state: Partial<EditorSessionState>) {
         downloadQuality: '1080p',
         downloadAudioBitrate: '0',
         customFileName: '',
-        exportMode: 'pro',
+        exportMode: mode,
+        processingMode: mode,
         savedAt: Date.now(),
       }),
       ...state,
+      exportMode: mode,
+      processingMode: mode,
       savedAt: Date.now(),
     };
     sessionStorage.setItem(SESSION_KEY, JSON.stringify(merged));
