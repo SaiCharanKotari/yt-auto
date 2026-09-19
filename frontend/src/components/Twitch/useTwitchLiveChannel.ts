@@ -31,28 +31,42 @@ export function isTwitchLiveChannelUrl(url: string | null | undefined): boolean 
   );
 }
 
+export interface ChunkItem {
+  offset: number;
+  url: string;
+  isReady: boolean;
+}
+
 export interface TwitchLiveChannelState {
-  /** The blob/object URL of the current MP4 chunk, ready to assign to active <video src> */
+  /** The blob/object URL of the current MP4 chunk */
   chunkUrl: string;
-  /** The blob/object URL of the next MP4 chunk, ready to preload in standby <video src> */
+  /** The blob/object URL of the next MP4 chunk */
   nextChunkUrl: string;
-  /** Whether the active chunk is currently being fetched from server/daemon */
+  /** Whether the required active chunk is currently being fetched */
   isLoadingChunk: boolean;
-  /** Error message if the last chunk fetch failed */
+  /** Error message if chunk fetch failed */
   chunkError: string;
-  /** The global time offset (seconds) this chunk starts at */
+  /** The global time offset (seconds) the current chunk starts at */
   chunkStartOffset: number;
-  /** Fetch a specific chunk on-demand for manual seek with caching and abort signal support */
+  /** Get a chunk URL by explicit offset (from cache or network) */
+  getChunk: (targetOffset: number, signal?: AbortSignal) => Promise<string>;
+  /** Check if a chunk is already cached */
+  hasChunk: (targetOffset: number) => boolean;
+  /** Get cached URL directly if available */
+  getCachedChunk: (targetOffset: number) => string | undefined;
+  /** Background prefetch for a specific offset */
+  prefetchChunk: (targetOffset: number) => void;
+  /** Fetch a specific chunk on-demand for manual seek */
   fetchChunkForSeek: (targetOffset: number, signal?: AbortSignal) => Promise<string>;
   /** Update active chunk offset and url after seek completes */
   setLiveChunkState: (offset: number, url: string) => void;
-  /** Call this to request the next chunk starting at a given offset (e.g. on manual seek) */
+  /** Call this to request the next chunk starting at a given offset */
   loadChunk: (startOffset: number, isManualSeek?: boolean) => void;
   /** Seamlessly advance state to the next chunk */
   advanceToNextChunk: () => void;
   /** Notify the hook of current playback seconds within chunk to trigger look-ahead prefetch */
   notifyPlaybackProgress: (localSeconds: number) => void;
-  /** Reload the current chunk (e.g. on user retry) */
+  /** Reload the current chunk */
   retryChunk: () => void;
 }
 
@@ -144,10 +158,10 @@ export function useTwitchLiveChannel(
       const objectUrl = URL.createObjectURL(blob);
       chunkCacheRef.current.set(targetOffset, objectUrl);
 
-      // Limit cache size to 12 chunks (60 seconds of video), evicting oldest non-active
-      if (chunkCacheRef.current.size > 12) {
+      // Limit cache size to 16 chunks (80 seconds of video), evicting oldest non-active
+      if (chunkCacheRef.current.size > 16) {
         const oldestKey = Array.from(chunkCacheRef.current.keys())[0];
-        if (oldestKey !== currentOffsetRef.current && oldestKey !== targetOffset) {
+        if (oldestKey !== currentOffsetRef.current && oldestKey !== targetOffset && oldestKey !== currentOffsetRef.current + CHUNK_DURATION) {
           const oldUrl = chunkCacheRef.current.get(oldestKey);
           if (oldUrl) {
             try { URL.revokeObjectURL(oldUrl); } catch {}
@@ -169,7 +183,21 @@ export function useTwitchLiveChannel(
     }
   }, [channelUrl, isPro]);
 
-  // Background Prefetching: immediately fetch next 1-2 chunks ahead and populate nextChunkUrl
+  const hasChunk = useCallback((targetOffset: number): boolean => {
+    return chunkCacheRef.current.has(targetOffset);
+  }, []);
+
+  const getCachedChunk = useCallback((targetOffset: number): string | undefined => {
+    return chunkCacheRef.current.get(targetOffset);
+  }, []);
+
+  const prefetchChunk = useCallback((targetOffset: number) => {
+    if (!isActive || !channelUrl) return;
+    if (chunkCacheRef.current.has(targetOffset) || inFlightRequestsRef.current.has(targetOffset)) return;
+    fetchSingleChunk(targetOffset).catch(() => {});
+  }, [isActive, channelUrl, fetchSingleChunk]);
+
+  // Priority Prefetching: fetch exact next chunk (offset + 5) first, then look-ahead (offset + 10)
   const prefetchUpcomingChunks = useCallback((fromOffset: number) => {
     if (!isActive || !channelUrl) return;
 
@@ -181,18 +209,23 @@ export function useTwitchLiveChannel(
       if (currentOffsetRef.current === fromOffset) {
         setNextChunkUrl(cachedNext1);
       }
+      // If next1 is already ready, fetch next2
+      if (!chunkCacheRef.current.has(next2) && !inFlightRequestsRef.current.has(next2)) {
+        fetchSingleChunk(next2).catch(() => {});
+      }
     } else {
+      // Prioritize next1 before fetching next2
       fetchSingleChunk(next1)
         .then((url) => {
           if (currentOffsetRef.current === fromOffset) {
             setNextChunkUrl(url);
           }
+          // After next1 finishes, fetch next2
+          if (!chunkCacheRef.current.has(next2) && !inFlightRequestsRef.current.has(next2)) {
+            fetchSingleChunk(next2).catch(() => {});
+          }
         })
         .catch(() => {});
-    }
-
-    if (!chunkCacheRef.current.has(next2) && !inFlightRequestsRef.current.has(next2)) {
-      fetchSingleChunk(next2).catch(() => {});
     }
   }, [isActive, channelUrl, fetchSingleChunk]);
 
@@ -281,13 +314,11 @@ export function useTwitchLiveChannel(
     const cachedNext = chunkCacheRef.current.get(nextOffset);
     if (cachedNext) {
       setChunkUrl(cachedNext);
-    } else if (nextChunkUrl) {
-      setChunkUrl(nextChunkUrl);
     }
 
     setNextChunkUrl('');
     prefetchUpcomingChunks(nextOffset);
-  }, [nextChunkUrl, prefetchUpcomingChunks]);
+  }, [prefetchUpcomingChunks]);
 
   const notifyPlaybackProgress = useCallback((localSeconds: number) => {
     if (localSeconds >= 0.5) {
@@ -321,6 +352,10 @@ export function useTwitchLiveChannel(
     isLoadingChunk,
     chunkError,
     chunkStartOffset,
+    getChunk: fetchSingleChunk,
+    hasChunk,
+    getCachedChunk,
+    prefetchChunk,
     fetchChunkForSeek,
     setLiveChunkState,
     loadChunk,

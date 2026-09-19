@@ -24,6 +24,7 @@ _STREAM_CACHE_LOCK = threading.Lock()
 _IN_FLIGHT_EXTRACTIONS: Dict[str, threading.Event] = {}
 _IN_FLIGHT_RESULTS: Dict[str, Tuple[bool, Optional[str], Optional[str]]] = {}
 _IN_FLIGHT_LOCK = threading.Lock()
+_EXTRACTION_SEMAPHORE = threading.BoundedSemaphore(value=2)
 
 
 def is_twitch_url(url: str) -> bool:
@@ -297,26 +298,27 @@ def extract_twitch_live_segment(
             str(output_path)
         ]
 
-        proc = subprocess.run(ff_cmd, capture_output=True, text=True, errors="replace", creationflags=flags, timeout=20)
-        
-        # Fallback to ultrafast transcode if copy failed or produced empty output
-        if proc.returncode != 0 or not output_path.exists() or output_path.stat().st_size == 0:
-            print(f"[Twitch Live Chunk] Fast copy failed. Attempting ultrafast transcode...")
-            transcode_cmd = [
-                ffmpeg_bin,
-                "-y",
-                "-ss", str(start_time),
-                "-i", stream_url,
-                "-t", str(chunk_duration),
-                "-c:v", "libx264",
-                "-preset", "ultrafast",
-                "-crf", "26",
-                "-c:a", "aac",
-                "-b:a", "128k",
-                "-movflags", "+faststart",
-                str(output_path)
-            ]
-            proc = subprocess.run(transcode_cmd, capture_output=True, text=True, errors="replace", creationflags=flags, timeout=25)
+        with _EXTRACTION_SEMAPHORE:
+            proc = subprocess.run(ff_cmd, capture_output=True, text=True, errors="replace", creationflags=flags, timeout=20)
+            
+            # Fallback to ultrafast transcode if copy failed or produced empty output
+            if proc.returncode != 0 or not output_path.exists() or output_path.stat().st_size == 0:
+                print(f"[Twitch Live Chunk] Fast copy failed. Attempting ultrafast transcode...")
+                transcode_cmd = [
+                    ffmpeg_bin,
+                    "-y",
+                    "-ss", str(start_time),
+                    "-i", stream_url,
+                    "-t", str(chunk_duration),
+                    "-c:v", "libx264",
+                    "-preset", "ultrafast",
+                    "-crf", "26",
+                    "-c:a", "aac",
+                    "-b:a", "128k",
+                    "-movflags", "+faststart",
+                    str(output_path)
+                ]
+                proc = subprocess.run(transcode_cmd, capture_output=True, text=True, errors="replace", creationflags=flags, timeout=25)
 
         if not output_path.exists() or output_path.stat().st_size == 0:
             raise RuntimeError("FFmpeg produced no output. Stream may be unavailable at this timestamp.")
