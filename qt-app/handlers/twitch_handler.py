@@ -28,6 +28,9 @@ _EXTRACTION_SEMAPHORE = threading.BoundedSemaphore(value=3)
 
 
 def is_twitch_url(url: str) -> bool:
+    if not url:
+        return False
+    return bool(re.search(r'(?:twitch\.tv|clips\.twitch\.tv)', url, re.IGNORECASE))
 
 
 def is_twitch_live_channel(url: str) -> bool:
