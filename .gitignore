@@ -2,7 +2,7 @@
 # ClipFlow / YT-Auto .gitignore
 # =======================================================
 
-# --- Environment & Secret Keys ---
+# --- Environment & Secrets ---
 .env
 .env.*
 !.env.example
@@ -13,6 +13,7 @@ atlas-credentials.env
 backend/atlas-credentials.env
 cookies.txt
 backend/cookies.txt
+qt-app/cookies.txt
 *.pem
 *.key
 
@@ -29,6 +30,30 @@ Thumbs.db
 *.sln
 *.sw?
 
+# --- Python & Cache Artifacts ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+env/
+venv/
+ENV/
+
+# --- Qt App Build & Distribution Artifacts ---
+qt-app/dist/
+qt-app/build/
+qt-app/build_installer/
+qt-app/build_pyi/
+qt-app/bin/*.exe
+qt-app/bin/*.dll
+qt-app/*.spec.bak
+qt-app/logs/
+qt-app/jobs/
+
 # --- Logs ---
 logs/
 *.log
@@ -43,7 +68,7 @@ node_modules/
 backend/node_modules/
 frontend/node_modules/
 
-# --- Build Outputs ---
+# --- Web App Build Outputs ---
 dist/
 dist-ssr/
 build/
@@ -64,8 +89,9 @@ backend/public/downloads/*
 *.m4a
 *.webm
 *.mkv
+*.ts
 
-# --- Binaries & Native Tools ---
+# --- Binaries, Toolchains, & Installers ---
 *.exe
 *.zip
 *.tar.gz
@@ -82,11 +108,8 @@ backend/download dlp.zip
 FFmpeg
 FFmpeg/
 release/
-qt-app/
 
-# --- Scratch Scripts, Dumps & Testing Artifacts ---
-__pycache__/
-*.pyc
+# --- Scratch & Platform Specific Dumps ---
 .twitch
 .twitch/
 available_domains.json

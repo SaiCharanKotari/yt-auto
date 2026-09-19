@@ -59,8 +59,8 @@ export interface TwitchLiveChannelState {
 export function useTwitchLiveChannel(
   isActive: boolean,
   channelUrl: string,
-  _isPro: boolean,
-  isDaemonRunning: boolean
+  isPro: boolean,
+  _isDaemonRunning?: boolean
 ): TwitchLiveChannelState {
   const [chunkUrl, setChunkUrl] = useState('');
   const [nextChunkUrl, setNextChunkUrl] = useState('');
@@ -106,30 +106,31 @@ export function useTwitchLiveChannel(
 
     const promise = (async () => {
       const encodedUrl = encodeURIComponent(channelUrl);
-      const serverEndpoint = `${BACKEND_URL}/api/twitch-live/live-chunk?url=${encodedUrl}&t=${targetOffset}&dur=${CHUNK_DURATION}`;
-      const daemonEndpoint = `${LOCAL_DAEMON_URL}/twitch/live-segment?url=${encodedUrl}&t=${targetOffset}&dur=${CHUNK_DURATION}`;
 
-      let res: Response | null = null;
-      try {
+      let res: Response;
+      if (isPro) {
+        // PRO USER: Browser → ClipFlow backend → Twitch → yt-dlp/Twitch resolver → FFmpeg → chunk → Browser
+        const serverEndpoint = `${BACKEND_URL}/api/twitch-live/live-chunk?url=${encodedUrl}&t=${targetOffset}&dur=${CHUNK_DURATION}`;
+        console.log(`%c[TwitchLive ⚡ PRO SERVER] Requesting chunk @ t=${targetOffset}s`, 'color: #a855f7; font-weight: bold;', serverEndpoint);
         res = await fetch(serverEndpoint, { signal });
-      } catch (netErr: any) {
-        if (netErr.name === 'AbortError') throw netErr;
-        if (isDaemonRunning) {
-          res = await fetch(daemonEndpoint, { signal });
-        } else {
-          throw netErr;
+        if (!res.ok) {
+          const errText = await res.text().catch(() => String(res.status));
+          throw new Error(`Server Error (${res.status}): ${errText.substring(0, 100)}`);
         }
-      }
-
-      if (!res.ok && isDaemonRunning && res.status >= 500) {
+      } else {
+        // FREE USER: Browser → Desktop Helper App (127.0.0.1:18942) → Twitch → yt-dlp/Twitch resolver → FFmpeg → chunk → Browser
+        const daemonEndpoint = `${LOCAL_DAEMON_URL}/twitch/live-segment?url=${encodedUrl}&t=${targetOffset}&dur=${CHUNK_DURATION}`;
+        console.log(`%c[TwitchLive 💻 LOCAL HELPER :18942] Requesting chunk @ t=${targetOffset}s`, 'color: #22c55e; font-weight: bold;', daemonEndpoint);
         try {
           res = await fetch(daemonEndpoint, { signal });
-        } catch {}
-      }
-
-      if (!res.ok) {
-        const errText = await res.text().catch(() => String(res.status));
-        throw new Error(`HTTP ${res.status}: ${errText.substring(0, 100)}`);
+        } catch (fetchErr: any) {
+          if (fetchErr.name === 'AbortError') throw fetchErr;
+          throw new Error('Desktop Helper App (port 18942) is required for free live Twitch preview. Please launch the Desktop Helper.');
+        }
+        if (!res.ok) {
+          const errText = await res.text().catch(() => String(res.status));
+          throw new Error(`Desktop Helper Error (${res.status}): ${errText.substring(0, 100)}`);
+        }
       }
 
       const blob = await res.blob();
@@ -161,7 +162,7 @@ export function useTwitchLiveChannel(
     } finally {
       inFlightRequestsRef.current.delete(targetOffset);
     }
-  }, [channelUrl, isDaemonRunning]);
+  }, [channelUrl, isPro]);
 
   // Background Prefetching: immediately fetch next 1-2 chunks ahead and populate nextChunkUrl
   const prefetchUpcomingChunks = useCallback((fromOffset: number) => {
