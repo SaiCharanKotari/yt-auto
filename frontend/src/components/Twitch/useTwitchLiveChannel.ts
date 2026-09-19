@@ -197,35 +197,41 @@ export function useTwitchLiveChannel(
     fetchSingleChunk(targetOffset).catch(() => {});
   }, [isActive, channelUrl, fetchSingleChunk]);
 
-  // Priority Prefetching: fetch exact next chunk (offset + 5) first, then look-ahead (offset + 10)
+  // Pipeline Prefetching: proactively fetch next1 (offset + 5) and next2 (offset + 10) in parallel
   const prefetchUpcomingChunks = useCallback((fromOffset: number) => {
     if (!isActive || !channelUrl) return;
 
     const next1 = fromOffset + CHUNK_DURATION;
     const next2 = fromOffset + CHUNK_DURATION * 2;
+    const next3 = fromOffset + CHUNK_DURATION * 3;
 
+    // Start fetching next1 immediately
     const cachedNext1 = chunkCacheRef.current.get(next1);
     if (cachedNext1) {
       if (currentOffsetRef.current === fromOffset) {
         setNextChunkUrl(cachedNext1);
       }
-      // If next1 is already ready, fetch next2
+      // If next1 is already ready, make sure next2 is being fetched
       if (!chunkCacheRef.current.has(next2) && !inFlightRequestsRef.current.has(next2)) {
         fetchSingleChunk(next2).catch(() => {});
       }
     } else {
-      // Prioritize next1 before fetching next2
       fetchSingleChunk(next1)
         .then((url) => {
           if (currentOffsetRef.current === fromOffset) {
             setNextChunkUrl(url);
           }
-          // After next1 finishes, fetch next2
-          if (!chunkCacheRef.current.has(next2) && !inFlightRequestsRef.current.has(next2)) {
-            fetchSingleChunk(next2).catch(() => {});
+          // After next1 completes, trigger next3 to keep buffer deep
+          if (!chunkCacheRef.current.has(next3) && !inFlightRequestsRef.current.has(next3)) {
+            fetchSingleChunk(next3).catch(() => {});
           }
         })
         .catch(() => {});
+
+      // Concurrently fetch next2 so that when next1 finishes playing, next2 is ALREADY decoded!
+      if (!chunkCacheRef.current.has(next2) && !inFlightRequestsRef.current.has(next2)) {
+        fetchSingleChunk(next2).catch(() => {});
+      }
     }
   }, [isActive, channelUrl, fetchSingleChunk]);
 
