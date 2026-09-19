@@ -66,72 +66,7 @@ router.options('/live-chunk', (_req: Request, res: Response) => {
   res.status(204).end();
 });
 
-// In-memory stream cache to avoid calling yt-dlp on every chunk request
-interface StreamCacheEntry {
-  streamUrl: string;
-  sourceType: 'dvr' | 'live';
-  expiresAt: number;
-}
-const streamCache = new Map<string, StreamCacheEntry>();
-
-async function getLiveOrDvrStreamUrl(channelUrl: string): Promise<{ streamUrl: string; sourceType: 'dvr' | 'live' }> {
-  const cached = streamCache.get(channelUrl);
-  if (cached && cached.expiresAt > Date.now()) {
-    return { streamUrl: cached.streamUrl, sourceType: cached.sourceType };
-  }
-
-  const channelMatch = channelUrl.match(/twitch\.tv\/([a-zA-Z0-9_]+)(?:\/)?$/i);
-  const channel = channelMatch ? channelMatch[1].toLowerCase() : '';
-
-  let vodId: string | null = null;
-  if (channel) {
-    try {
-      const gqlRes = await fetch('https://gql.twitch.tv/gql', {
-        method: 'POST',
-        headers: {
-          'Client-ID': 'kimne78kx3ncx6brgo4mv6wki5h1ko',
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          query: `query { user(login: "${channel}") { stream { id createdAt } videos(first: 3, sort: TIME) { edges { node { id status broadcastType createdAt } } } } }`,
-        }),
-      });
-      if (gqlRes.ok) {
-        const gqlData = await gqlRes.json();
-        const edges = gqlData?.data?.user?.videos?.edges || [];
-        const recordingVod = edges.find((e: any) => {
-          const n = e?.node;
-          return n && (n.status === 'RECORDING' || n.broadcastType === 'ARCHIVE');
-        })?.node;
-        if (recordingVod?.id) {
-          vodId = recordingVod.id;
-          console.log(`[Twitch Live] Found active DVR VOD for ${channel}: https://www.twitch.tv/videos/${vodId}`);
-        }
-      }
-    } catch (gqlErr: any) {
-      console.warn(`[Twitch Live] GQL check error for ${channel}:`, gqlErr.message);
-    }
-  }
-
-  const targetResolveUrl = vodId ? `https://www.twitch.tv/videos/${vodId}` : channelUrl;
-  console.log(`[Twitch Live] Resolving 720p HLS stream URL via yt-dlp for: ${targetResolveUrl}`);
-
-  const cmd = `"${YTDLP_BIN}" -g -f "best[height<=720]/bestvideo[height<=720]+bestaudio/best" --no-warnings --no-check-certificate "${targetResolveUrl}"`;
-  const { stdout } = await execAsync(cmd, { timeout: 20000 });
-  const streamUrl = stdout.trim().split('\n')[0].trim();
-
-  if (!streamUrl) {
-    throw new Error('Failed to resolve Twitch stream URL from yt-dlp.');
-  }
-
-  const entry: StreamCacheEntry = {
-    streamUrl,
-    sourceType: vodId ? 'dvr' : 'live',
-    expiresAt: Date.now() + 12 * 60 * 1000, // 12 minutes TTL
-  };
-  streamCache.set(channelUrl, entry);
-  return { streamUrl, sourceType: entry.sourceType };
-}
+import { TwitchStreamResolverService } from '../services/twitch/index.js';
 
 // In-flight extraction promises to prevent multiple FFmpeg processes for the same chunk
 const inFlightExtractions = new Map<string, Promise<void>>();
@@ -236,7 +171,7 @@ router.get('/live-chunk', async (req: Request, res: Response) => {
 
   const extractionPromise = (async () => {
     // Get cached or fresh 720p stream URL
-    let { streamUrl, sourceType } = await getLiveOrDvrStreamUrl(targetUrl);
+    let { streamUrl, sourceType } = await TwitchStreamResolverService.resolveStreamUrl(targetUrl, YTDLP_BIN, '720p');
 
     console.log(`[Twitch Live Chunk] Extracting ${chunkDuration}s at t=${startTime}s (${sourceType} mode)...`);
     const ffCmd = `"${FFMPEG_BIN}" -y -ss ${startTime} -i "${streamUrl}" -t ${chunkDuration} -c copy -movflags +faststart -bsf:a aac_adtstoasc "${outputPath}"`;

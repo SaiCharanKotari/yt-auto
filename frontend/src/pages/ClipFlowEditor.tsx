@@ -161,6 +161,8 @@ export default function ClipFlowEditor() {
   const videoElementRef = useRef<HTMLVideoElement | null>(null);
   const sliderWrapRef = useRef<HTMLDivElement>(null);
   const videoContainerRef = useRef<HTMLDivElement>(null);
+  const isSeekingRef = useRef<boolean>(false);
+  const pendingSeekTimeRef = useRef<number | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isVideoBuffering, setIsVideoBuffering] = useState(false);
   const [currentTime, setCurrentTime] = useState(initialSession?.currentTime || 0);
@@ -530,7 +532,7 @@ export default function ClipFlowEditor() {
 
       const hls = new Hls({
         enableWorker: true,
-        lowLatencyMode: true,
+        lowLatencyMode: false,
         backBufferLength: 300,
         maxBufferLength: 60,
         maxMaxBufferLength: 120,
@@ -1156,6 +1158,12 @@ export default function ClipFlowEditor() {
       if (videoElementRef.current && isPlaying) {
         // Live channel time updates are driven exclusively by onTimeUpdate to prevent seek snap-backs
         if (!isLiveChannelUrl) {
+          if (isSeekingRef.current) {
+            if (isPlaying) {
+              animationFrameId = requestAnimationFrame(updateTime);
+            }
+            return;
+          }
           try {
             const v = videoElementRef.current;
             setCurrentTime(v.currentTime);
@@ -1195,11 +1203,15 @@ export default function ClipFlowEditor() {
   }, [isPlaying, trimRange, isTrimEnabled, activeUrl, effectiveDuration, youtubeId, isTwitch]);
 
   const seekToPosition = (newTime: number) => {
-    const targetTime = Math.max(0, Math.min(newTime, effectiveDuration || newTime));
+    const targetTime = Math.max(0, Math.min(newTime, effectiveDuration > 0 ? effectiveDuration : newTime));
+    pendingSeekTimeRef.current = targetTime;
+    isSeekingRef.current = true;
     setCurrentTime(targetTime);
 
     if (youtubeId && youtubePlayerRef.current) {
       try { youtubePlayerRef.current.seekTo(targetTime, true); } catch (e) { }
+      isSeekingRef.current = false;
+      pendingSeekTimeRef.current = null;
     } else if (isLiveChannelUrl) {
       const chunkBase = Math.floor(targetTime / 5) * 5;
       const fraction = targetTime - chunkBase;
@@ -1220,7 +1232,11 @@ export default function ClipFlowEditor() {
         refreshLiveSegment();
       } else {
         const v = videoElementRef.current;
-        v.currentTime = targetTime;
+        try {
+          v.currentTime = targetTime;
+        } catch (e) {
+          console.warn('[ClipFlow Seek Error]', e);
+        }
       }
     }
   };
@@ -1899,11 +1915,18 @@ export default function ClipFlowEditor() {
                             }}
                             onSeeking={() => {
                               console.log('%c[ClipFlow ⏩ VIDEO SEEKING]', 'color: #38bdf8;', { currentTime: videoElementRef.current?.currentTime });
+                              isSeekingRef.current = true;
                               setIsVideoBuffering(true);
                             }}
-                            onSeeked={() => {
-                              console.log('%c[ClipFlow ⏩ VIDEO SEEKED]', 'color: #38bdf8;');
+                            onSeeked={(e) => {
+                              const v = e.currentTarget;
+                              console.log('%c[ClipFlow ⏩ VIDEO SEEKED]', 'color: #38bdf8;', { currentTime: v.currentTime });
                               setIsVideoBuffering(false);
+                              if (!isLiveChannelUrl) {
+                                setCurrentTime(v.currentTime);
+                                pendingSeekTimeRef.current = null;
+                                isSeekingRef.current = false;
+                              }
                             }}
                             onCanPlay={() => {
                               console.log('%c[ClipFlow 🚀 VIDEO CAN PLAY]', 'color: #22c55e; font-weight: bold;', {
@@ -1987,6 +2010,9 @@ export default function ClipFlowEditor() {
                                 setCurrentTime(currentTimelineTime);
                                 notifyLivePlaybackProgress(v.currentTime);
                               } else {
+                                if (isSeekingRef.current) {
+                                  return; // Ignore stale time updates while seek is pending/in-flight
+                                }
                                 setCurrentTime(v.currentTime);
                                 const isExplicitSubClip = isTrimEnabled && (trimRange[0] > 1 || (trimRange[1] > 0 && trimRange[1] < effectiveDuration - 2));
                                 if (isExplicitSubClip && v.currentTime >= trimRange[1]) {
@@ -2116,7 +2142,8 @@ export default function ClipFlowEditor() {
                         max={effectiveDuration > 0 ? effectiveDuration : 10}
                         onValueChange={(val) => {
                           if (!isLiveChannelUrl) {
-                            seekToPosition(val[0]);
+                            setCurrentTime(val[0]);
+                            pendingSeekTimeRef.current = val[0];
                           } else {
                             isSeekingLiveRef.current = true;
                             setCurrentTime(val[0]);
@@ -2384,9 +2411,11 @@ export default function ClipFlowEditor() {
                           setTrimRange([val[0], val[1]]);
                           if (!isLiveChannelUrl) {
                             if (val[0] !== trimRange[0]) {
-                              seekToPosition(val[0]);
+                              setCurrentTime(val[0]);
+                              pendingSeekTimeRef.current = val[0];
                             } else if (val[1] !== trimRange[1]) {
-                              seekToPosition(val[1]);
+                              setCurrentTime(val[1]);
+                              pendingSeekTimeRef.current = val[1];
                             }
                           }
                         }}
