@@ -235,7 +235,7 @@ export default function ClipFlowEditor() {
     advanceToNextChunk: advanceLiveChunk,
     notifyPlaybackProgress: notifyLivePlaybackProgress,
     retryChunk: retryLiveChunk,
-  } = useTwitchLiveChannel(isLiveChannelUrl, activeUrl, isProUser, isHelperRunning);
+  } = useTwitchLiveChannel(isLiveChannelUrl, activeUrl, processingMode, isHelperRunning);
   void liveChunkError;
   void retryLiveChunk;
 
@@ -1001,78 +1001,39 @@ export default function ClipFlowEditor() {
       }
       console.log('%c[ClipFlow Web 📡 METADATA NETWORK REQUEST]', 'color: #38bdf8; font-weight: bold;', { targetUrl });
 
-      // Route metadata strictly based on authoritative processingMode
-      if (processingMode === 'free') {
-        // FREE MODE: Exclusively Desktop Helper App (port 18942)
-        const endpoint = 'http://127.0.0.1:18942/metadata';
-        try {
-          console.log(`[ClipFlow Web 💻 FREE] Querying metadata from local helper: ${endpoint}`);
-          const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 3500);
-          const res = await fetch(endpoint, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ url: targetUrl }),
-            signal: controller.signal,
-          });
-          clearTimeout(timeoutId);
+      // Metadata is ALWAYS fetched server-side for both FREE and PRO
+      const endpoint = `${BACKEND_URL}/api/video/metadata`;
+      try {
+        console.log(`[ClipFlow Web 📡 METADATA] Fetching from server: ${endpoint}`);
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 25000);
+        const res = await fetch(endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url: targetUrl }),
+          signal: controller.signal,
+        });
+        clearTimeout(timeoutId);
 
-          if (res.ok) {
-            const json = await res.json();
-            if (json && !json.error && (json.title || json.id)) {
-              data = json;
-              setIsHelperRunning(true);
-              console.log('%c[ClipFlow Web METADATA SUCCESS (LOCAL)]', 'color: #22c55e; font-weight: bold;', {
-                endpoint,
-                title: json.title,
-                duration: json.duration_string || json.duration,
-                formatsCount: json.formats?.length || 0,
-              });
-            }
-          } else {
-            const errJson = await res.json().catch(() => null);
-            if (errJson?.error) lastErrorMessage = errJson.error;
+        if (res.ok) {
+          const json = await res.json();
+          if (json && !json.error && (json.title || json.id)) {
+            data = json;
+            console.log('%c[ClipFlow Web METADATA SUCCESS (SERVER)]', 'color: #22c55e; font-weight: bold;', {
+              endpoint,
+              title: json.title,
+              duration: json.duration_string || json.duration,
+              formatsCount: json.formats?.length || 0,
+            });
           }
-        } catch (e: any) {
-          console.warn(`[ClipFlow Web 💻 FREE] Desktop Helper unreachable at ${endpoint}: ${e.message}`);
-          setIsHelperRunning(false);
-          lastErrorMessage = 'ClipFlow Desktop Helper is offline. Please launch the Helper app.';
+        } else {
+          const errJson = await res.json().catch(() => null);
+          if (errJson?.error) lastErrorMessage = errJson.error;
         }
-      } else {
-        // PRO MODE: Exclusively ClipFlow Backend Server
-        const endpoint = `${BACKEND_URL}/api/video/metadata`;
-        try {
-          console.log(`[ClipFlow Web ⚡ PRO] Querying metadata from server: ${endpoint}`);
-          const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 25000);
-          const res = await fetch(endpoint, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ url: targetUrl }),
-            signal: controller.signal,
-          });
-          clearTimeout(timeoutId);
-
-          if (res.ok) {
-            const json = await res.json();
-            if (json && !json.error && (json.title || json.id)) {
-              data = json;
-              console.log('%c[ClipFlow Web METADATA SUCCESS (SERVER)]', 'color: #22c55e; font-weight: bold;', {
-                endpoint,
-                title: json.title,
-                duration: json.duration_string || json.duration,
-                formatsCount: json.formats?.length || 0,
-              });
-            }
-          } else {
-            const errJson = await res.json().catch(() => null);
-            if (errJson?.error) lastErrorMessage = errJson.error;
-          }
-        } catch (e: any) {
-          console.warn(`[ClipFlow Web ⚡ PRO] Server unreachable at ${endpoint}: ${e.message}`);
-          if (!lastErrorMessage && e.name !== 'AbortError') {
-            lastErrorMessage = e.message;
-          }
+      } catch (e: any) {
+        console.warn(`[ClipFlow Web 📡 METADATA] Server unreachable at ${endpoint}: ${e.message}`);
+        if (!lastErrorMessage && e.name !== 'AbortError') {
+          lastErrorMessage = e.message;
         }
       }
 

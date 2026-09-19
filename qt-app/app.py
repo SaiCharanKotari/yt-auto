@@ -376,7 +376,8 @@ class LocalHTTPRequestHandler(BaseHTTPRequestHandler):
 
     def do_OPTIONS(self):
         origin = self.headers.get("Origin", "*")
-        print(f"\n[ClipFlow Helper] --> RECV OPTIONS {self.path} (Origin: {origin})")
+        if self.path not in ["/status", "/health", "/"]:
+            print(f"[RECV] OPTIONS {self.path}")
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", origin if origin else "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS, HEAD")
@@ -385,7 +386,6 @@ class LocalHTTPRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", "0")
         self.send_header("Connection", "close")
         self.end_headers()
-        print(f"[ClipFlow Helper] <-- RESP 204 OK (CORS Preflight Approved)")
 
     def do_HEAD(self):
         parsed = urlparse(self.path)
@@ -410,18 +410,20 @@ class LocalHTTPRequestHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         origin = self.headers.get("Origin", "")
-        print(f"\n[ClipFlow Helper] --> RECV GET {self.path} (Origin: {origin or 'Local'})")
-        if not is_origin_allowed(origin):
-            print(f"[ClipFlow Helper] [REJECT] 403 Forbidden - Origin '{origin}' not permitted")
-            self._send_json(403, {"error": "Forbidden: Unauthorized Origin"}, origin)
-            return
-
         parsed = urlparse(self.path)
+
         if parsed.path in ["/status", "/health", "/"]:
             resp_body = {"status": "ok", "app": "ClipFlowHelper", "version": "1.0.0"}
             self._send_json(200, resp_body, origin)
-            print(f"[ClipFlow Helper] <-- RESP 200 OK -> {resp_body}")
-        elif parsed.path == "/twitch/live-segment":
+            return
+
+        print(f"[RECV] GET {self.path}")
+        if not is_origin_allowed(origin):
+            print(f"[ERR] 403 Forbidden - Origin '{origin}' not permitted")
+            self._send_json(403, {"error": "Forbidden: Unauthorized Origin"}, origin)
+            return
+
+        if parsed.path == "/twitch/live-segment":
             import urllib.parse
             query_params = urllib.parse.parse_qs(parsed.query)
             target_url = query_params.get("url", [""])[0].strip()
@@ -450,7 +452,7 @@ class LocalHTTPRequestHandler(BaseHTTPRequestHandler):
             chunks_dir = LOCAL_APPDATA / "temp" / "live-chunks"
             chunks_dir.mkdir(parents=True, exist_ok=True)
 
-            print(f"[ClipFlow Helper] Extracting Twitch live chunk: {target_url} @ t={start_time}s (dur={chunk_duration}s)")
+            print(f"[CHUNK] Extracting live segment: {target_url} @ t={start_time}s (dur={chunk_duration}s)")
             success, chunk_path, err_msg = extract_twitch_live_segment(
                 target_url,
                 start_time,
@@ -461,6 +463,7 @@ class LocalHTTPRequestHandler(BaseHTTPRequestHandler):
             )
 
             if not success or not chunk_path or not os.path.exists(chunk_path):
+                print(f"[ERR] Live chunk extraction failed: {err_msg}")
                 self._send_json(500, {"error": err_msg or "Failed to extract live Twitch chunk via local engine"}, origin)
                 return
 
@@ -480,15 +483,16 @@ class LocalHTTPRequestHandler(BaseHTTPRequestHandler):
 
                 with open(chunk_path, "rb") as f:
                     shutil.copyfileobj(f, self.wfile)
+                print(f"[SEND] Chunk @ t={start_time}s delivered ({size // 1024}KB)")
             except Exception as e:
-                print(f"[ClipFlow Helper Error] Streaming live chunk: {e}")
+                print(f"[ERR] Streaming live chunk: {e}")
         else:
             self._send_json(404, {"error": f"Endpoint '{self.path}' not found"}, origin)
-            print(f"[ClipFlow Helper] <-- RESP 404 Not Found for {self.path}")
+            print(f"[ERR] 404 Not Found: {self.path}")
 
     def do_POST(self):
         origin = self.headers.get("Origin", "")
-        print(f"\n[ClipFlow Helper] --> RECV POST {self.path} (Origin: {origin or 'Local'})")
+        print(f"[RECV] POST {self.path}")
         if not is_origin_allowed(origin):
             print(f"[ClipFlow Helper] [REJECT] 403 Forbidden - Origin '{origin}' not permitted")
             self._send_json(403, {"error": "Forbidden: Unauthorized Origin"}, origin)

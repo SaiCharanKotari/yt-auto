@@ -190,7 +190,6 @@ def build_twitch_metadata_args(url: str, ffmpeg_dir: Optional[str] = None) -> Li
     args = [
         "--no-playlist",
         "--dump-json",
-        "--twitch-disable-ads",
         "--retries", "10",
     ]
     if ffmpeg_dir:
@@ -212,7 +211,6 @@ def build_twitch_download_args(
         "--newline",
         "--progress",
         "--progress-template", "download:[CLIPFLOW_PROG] %(progress._percent_str)s|%(progress._total_bytes_estimate_str,progress._total_bytes_str)s|%(progress._speed_str)s|%(progress._eta_str)s",
-        "--twitch-disable-ads",
         "--retries", "10",
         "--fragment-retries", "10",
     ]

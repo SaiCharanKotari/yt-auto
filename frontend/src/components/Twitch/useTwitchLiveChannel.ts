@@ -59,9 +59,10 @@ export interface TwitchLiveChannelState {
 export function useTwitchLiveChannel(
   isActive: boolean,
   channelUrl: string,
-  isPro: boolean,
+  processingMode: 'free' | 'pro' | boolean,
   _isDaemonRunning?: boolean
 ): TwitchLiveChannelState {
+  const isPro = processingMode === 'pro' || processingMode === true;
   const [chunkUrl, setChunkUrl] = useState('');
   const [nextChunkUrl, setNextChunkUrl] = useState('');
   const [isLoadingChunk, setIsLoadingChunk] = useState(false);
@@ -111,7 +112,9 @@ export function useTwitchLiveChannel(
       if (isPro) {
         // PRO USER: Browser → ClipFlow backend → Twitch → yt-dlp/Twitch resolver → FFmpeg → chunk → Browser
         const serverEndpoint = `${BACKEND_URL}/api/twitch-live/live-chunk?url=${encodedUrl}&t=${targetOffset}&dur=${CHUNK_DURATION}`;
-        console.log(`%c[TwitchLive ⚡ PRO SERVER] Requesting chunk @ t=${targetOffset}s`, 'color: #a855f7; font-weight: bold;', serverEndpoint);
+        console.log('%c[ClipFlow] Twitch Processing Mode: PRO', 'color: #a855f7; font-weight: bold;');
+        console.log('%c[ClipFlow] Twitch Chunk Source: SERVER', 'color: #a855f7; font-weight: bold;');
+        console.log(`%c[ClipFlow] Requesting server chunk @ t=${targetOffset}s`, 'color: #a855f7;', serverEndpoint);
         res = await fetch(serverEndpoint, { signal });
         if (!res.ok) {
           const errText = await res.text().catch(() => String(res.status));
@@ -120,7 +123,9 @@ export function useTwitchLiveChannel(
       } else {
         // FREE USER: Browser → Desktop Helper App (127.0.0.1:18942) → Twitch → yt-dlp/Twitch resolver → FFmpeg → chunk → Browser
         const daemonEndpoint = `${LOCAL_DAEMON_URL}/twitch/live-segment?url=${encodedUrl}&t=${targetOffset}&dur=${CHUNK_DURATION}`;
-        console.log(`%c[TwitchLive 💻 LOCAL HELPER :18942] Requesting chunk @ t=${targetOffset}s`, 'color: #22c55e; font-weight: bold;', daemonEndpoint);
+        console.log('%c[ClipFlow] Twitch Processing Mode: FREE', 'color: #22c55e; font-weight: bold;');
+        console.log('%c[ClipFlow] Twitch Chunk Source: LOCAL_HELPER', 'color: #22c55e; font-weight: bold;');
+        console.log(`%c[ClipFlow] Requesting local chunk @ t=${targetOffset}s`, 'color: #22c55e;', daemonEndpoint);
         try {
           res = await fetch(daemonEndpoint, { signal });
         } catch (fetchErr: any) {
