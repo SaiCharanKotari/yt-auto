@@ -808,18 +808,21 @@ export default function ClipFlowEditor() {
       console.log(`[LIVE SOURCE] Player=A offset=${liveChunkOffset} url=${liveChunkUrl.substring(0, 50)}...`);
 
       const expectedNext = liveChunkOffset + 5;
-      prefetchLiveChunk(expectedNext);
-      const cachedNext = getCachedLiveChunk(expectedNext);
-      const slotB = playerSlotsRef.current.B;
-      if (cachedNext && videoBElementRef.current && slotB.offset === -1) {
-        slotB.offset = expectedNext;
-        slotB.url = cachedNext;
-        slotB.isReady = false;
-        videoBElementRef.current.src = cachedNext;
-        videoBElementRef.current.load();
-      }
+      getLiveChunk(expectedNext).then((nextUrl) => {
+        const slotB = playerSlotsRef.current.B;
+        if (videoBElementRef.current && (slotB.offset === -1 || slotB.offset === expectedNext)) {
+          slotB.offset = expectedNext;
+          slotB.url = nextUrl;
+          slotB.isReady = false;
+          videoBElementRef.current.src = nextUrl;
+          videoBElementRef.current.load();
+        }
+      }).catch(() => {});
+
+      // Pipeline prefetch chunk + 10 ahead of time
+      prefetchLiveChunk(expectedNext + 5);
     }
-  }, [isLiveChannelUrl, liveChunkUrl, liveChunkOffset, prefetchLiveChunk, getCachedLiveChunk]);
+  }, [isLiveChannelUrl, liveChunkUrl, liveChunkOffset, getLiveChunk, prefetchLiveChunk]);
 
 
   // Socket.io ref for cloud download real-time progress
@@ -1572,20 +1575,24 @@ export default function ClipFlowEditor() {
 
     // 10. Prepare following chunk (expectedOffset + 5) in the now-inactive standby player (MUST REMAIN PAUSED)
     const followingOffset = expectedOffset + 5;
-    prefetchLiveChunk(followingOffset);
-    const cachedFollowing = getCachedLiveChunk(followingOffset);
-    const standbyVideo = newStandbyTag === 'A' ? videoAElementRef.current : videoBElementRef.current;
-    const standbySlot = playerSlotsRef.current[newStandbyTag];
-    if (cachedFollowing && standbyVideo) {
-      if (standbySlot.offset !== followingOffset || standbySlot.url !== cachedFollowing) {
-        standbySlot.offset = followingOffset;
-        standbySlot.url = cachedFollowing;
-        standbySlot.isReady = false;
-        standbyVideo.src = cachedFollowing;
-        standbyVideo.load();
+    getLiveChunk(followingOffset).then((url) => {
+      const currentStandbyTag = activeLivePlayerRef.current === 'A' ? 'B' : 'A';
+      if (newStandbyTag === currentStandbyTag && activeChunkOffsetRef.current === expectedOffset) {
+        const standbyVideo = newStandbyTag === 'A' ? videoAElementRef.current : videoBElementRef.current;
+        const standbySlot = playerSlotsRef.current[newStandbyTag];
+        if (standbyVideo && (standbySlot.offset !== followingOffset || standbySlot.url !== url)) {
+          standbySlot.offset = followingOffset;
+          standbySlot.url = url;
+          standbySlot.isReady = false;
+          standbyVideo.src = url;
+          standbyVideo.load();
+        }
       }
-    }
-  }, [safePausePlayer, safePlayPlayer, prefetchLiveChunk, getCachedLiveChunk]);
+    }).catch(() => {});
+
+    // Pipeline prefetch chunk + 10 ahead of time
+    prefetchLiveChunk(followingOffset + 5);
+  }, [safePausePlayer, safePlayPlayer, getLiveChunk, prefetchLiveChunk]);
 
   // Standby player decoding handler — marks ready and resumes playback ONLY via swapToLiveChunk
   const handleLivePlayerCanPlay = (playerTag: 'A' | 'B') => {
