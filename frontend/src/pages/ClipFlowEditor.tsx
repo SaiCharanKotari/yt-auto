@@ -220,6 +220,8 @@ export default function ClipFlowEditor() {
   const liveSeekGenRef = useRef<number>(0);
   const liveSeekAbortRef = useRef<AbortController | null>(null);
   const [activeLivePlayer, setActiveLivePlayer] = useState<'A' | 'B'>('A');
+  const activeLivePlayerRef = useRef<'A' | 'B'>('A');
+  const isPlayingRef = useRef<boolean>(false);
   const videoAElementRef = useRef<HTMLVideoElement | null>(null);
   const videoBElementRef = useRef<HTMLVideoElement | null>(null);
 
@@ -233,6 +235,48 @@ export default function ClipFlowEditor() {
   });
   const activeChunkOffsetRef = useRef<number>(0);
   const isBufferingAtBoundaryRef = useRef<boolean>(false);
+
+  useEffect(() => {
+    isPlayingRef.current = isPlaying;
+  }, [isPlaying]);
+
+  const safePausePlayer = useCallback((tag: 'A' | 'B') => {
+    const el = tag === 'A' ? videoAElementRef.current : videoBElementRef.current;
+    if (el && !el.paused) {
+      try { el.pause(); } catch (e) { }
+      console.log(`[LIVE PLAYER] ${tag} PAUSE`);
+    }
+  }, []);
+
+  const safePlayPlayer = useCallback((tag: 'A' | 'B') => {
+    const el = tag === 'A' ? videoAElementRef.current : videoBElementRef.current;
+    const otherTag = tag === 'A' ? 'B' : 'A';
+    safePausePlayer(otherTag);
+    if (el) {
+      el.play().then(() => {
+        console.log(`[LIVE PLAYER] ${tag} PLAY`);
+      }).catch(() => { });
+    }
+  }, [safePausePlayer]);
+
+  // Enforce strict single player invariant: whenever A is active, B must be paused; whenever B is active, A must be paused
+  useEffect(() => {
+    activeLivePlayerRef.current = activeLivePlayer;
+    if (!isLiveChannelUrl) return;
+    if (activeLivePlayer === 'A') {
+      const b = videoBElementRef.current;
+      if (b && !b.paused) {
+        try { b.pause(); } catch (e) { }
+        console.log('[LIVE PLAYER] B PAUSE');
+      }
+    } else {
+      const a = videoAElementRef.current;
+      if (a && !a.paused) {
+        try { a.pause(); } catch (e) { }
+        console.log('[LIVE PLAYER] A PAUSE');
+      }
+    }
+  }, [activeLivePlayer, isLiveChannelUrl]);
 
   const {
     chunkUrl: liveChunkUrl,
@@ -251,6 +295,8 @@ export default function ClipFlowEditor() {
     notifyPlaybackProgress: notifyLivePlaybackProgress,
     retryChunk: retryLiveChunk,
   } = useTwitchLiveChannel(isLiveChannelUrl, activeUrl, processingMode, isHelperRunning);
+  void setLiveChunkState;
+  void advanceLiveChunk;
   void liveChunkError;
   void retryLiveChunk;
   void loadLiveChunk;
@@ -500,6 +546,14 @@ export default function ClipFlowEditor() {
     setSelectedPreviewQualityUrl('');
     setIsVideoBuffering(false);
     setUseProxyFallback(false);
+    playerSlotsRef.current = {
+      A: { offset: -1, url: '', isReady: false },
+      B: { offset: -1, url: '', isReady: false },
+    };
+    activeChunkOffsetRef.current = 0;
+    activeLivePlayerRef.current = 'A';
+    setActiveLivePlayer('A');
+    isBufferingAtBoundaryRef.current = false;
   }, [activeUrl]);
 
   // Current active quality label
@@ -734,43 +788,38 @@ export default function ClipFlowEditor() {
     }
   }, [rawPreviewSrc, activeVideoSrc, isHls, isLiveStream, isTwitch, twitchHlsUrl, isTwitter, youtubeId, useProxyFallback, isLiveChannelUrl]);
 
-  // Sync live chunk URLs strictly to double-buffered video elements using explicit slots
+  // Initial setup for live chunk URLs to double-buffered video elements
   useEffect(() => {
     if (!isLiveChannelUrl) return;
-    if (isSeekingLiveRef.current) return; // Do not let background prefetch sync interfere during an active seek
+    if (isSeekingLiveRef.current) return;
     if (!liveChunkUrl) return;
 
-    activeChunkOffsetRef.current = liveChunkOffset;
-    const activeSlot = activeLivePlayer === 'A' ? playerSlotsRef.current.A : playerSlotsRef.current.B;
-    const activeVideo = activeLivePlayer === 'A' ? videoAElementRef.current : videoBElementRef.current;
+    // Only set initial chunk if Player A has not been initialized yet (offset === -1)
+    const slotA = playerSlotsRef.current.A;
+    if (slotA.offset === -1 && videoAElementRef.current) {
+      slotA.offset = liveChunkOffset;
+      slotA.url = liveChunkUrl;
+      slotA.isReady = false;
+      activeChunkOffsetRef.current = liveChunkOffset;
+      activeLivePlayerRef.current = 'A';
+      setActiveLivePlayer('A');
+      videoAElementRef.current.src = liveChunkUrl;
+      videoAElementRef.current.load();
+      console.log(`[LIVE SOURCE] Player=A offset=${liveChunkOffset} url=${liveChunkUrl.substring(0, 50)}...`);
 
-    if (activeVideo && (activeSlot.offset !== liveChunkOffset || activeSlot.url !== liveChunkUrl)) {
-      activeSlot.offset = liveChunkOffset;
-      activeSlot.url = liveChunkUrl;
-      activeSlot.isReady = false;
-      activeVideo.src = liveChunkUrl;
-      activeVideo.load();
-      if (isPlaying) {
-        activeVideo.play().catch(() => { });
+      const expectedNext = liveChunkOffset + 5;
+      prefetchLiveChunk(expectedNext);
+      const cachedNext = getCachedLiveChunk(expectedNext);
+      const slotB = playerSlotsRef.current.B;
+      if (cachedNext && videoBElementRef.current && slotB.offset === -1) {
+        slotB.offset = expectedNext;
+        slotB.url = cachedNext;
+        slotB.isReady = false;
+        videoBElementRef.current.src = cachedNext;
+        videoBElementRef.current.load();
       }
     }
-
-    // Explicitly prefetch and assign the required next chunk (liveChunkOffset + 5) into standby player
-    const expectedNext = liveChunkOffset + 5;
-    const standbyTag = activeLivePlayer === 'A' ? 'B' : 'A';
-    const standbySlot = playerSlotsRef.current[standbyTag];
-    const standbyVideo = standbyTag === 'A' ? videoAElementRef.current : videoBElementRef.current;
-
-    prefetchLiveChunk(expectedNext);
-    const cachedNext = getCachedLiveChunk(expectedNext);
-    if (cachedNext && standbyVideo && (standbySlot.offset !== expectedNext || standbySlot.url !== cachedNext)) {
-      standbySlot.offset = expectedNext;
-      standbySlot.url = cachedNext;
-      standbySlot.isReady = false;
-      standbyVideo.src = cachedNext;
-      standbyVideo.load();
-    }
-  }, [isLiveChannelUrl, liveChunkUrl, liveChunkOffset, activeLivePlayer, isPlaying, prefetchLiveChunk, getCachedLiveChunk]);
+  }, [isLiveChannelUrl, liveChunkUrl, liveChunkOffset, prefetchLiveChunk, getCachedLiveChunk]);
 
 
   // Socket.io ref for cloud download real-time progress
@@ -1310,7 +1359,6 @@ export default function ClipFlowEditor() {
       isBufferingAtBoundaryRef.current = false;
       const chunkOffset = Math.floor(targetTime / 5) * 5;
       const localTime = targetTime - chunkOffset;
-      const wasPlaying = isPlaying;
 
       isSeekingLiveRef.current = true;
       setIsVideoBuffering(true);
@@ -1318,11 +1366,9 @@ export default function ClipFlowEditor() {
 
       const currentGen = ++liveSeekGenRef.current;
 
-      // 1. Immediately pause the currently active video so the old chunk stops playing while new chunk loads
-      const currentVideo = activeLivePlayer === 'A' ? videoAElementRef.current : videoBElementRef.current;
-      if (currentVideo) {
-        try { currentVideo.pause(); } catch (e) { }
-      }
+      // 1. Immediately pause BOTH players so nothing plays in background
+      safePausePlayer('A');
+      safePausePlayer('B');
 
       // 2. Cancel prior in-flight seek requests
       if (liveSeekAbortRef.current) {
@@ -1336,12 +1382,11 @@ export default function ClipFlowEditor() {
         targetTime,
         chunkOffset,
         localTime,
-        wasPlaying,
-        activeLivePlayer,
+        activeLivePlayer: activeLivePlayerRef.current,
       });
 
       // 3. Target player for the seek is the STANDBY (inactive) player
-      const targetPlayerTag = activeLivePlayer === 'A' ? 'B' : 'A';
+      const targetPlayerTag = activeLivePlayerRef.current === 'A' ? 'B' : 'A';
       const targetVideo = targetPlayerTag === 'A' ? videoAElementRef.current : videoBElementRef.current;
 
       (async () => {
@@ -1408,42 +1453,13 @@ export default function ClipFlowEditor() {
           if (liveSeekGenRef.current !== currentGen) return;
 
           playerSlotsRef.current[targetPlayerTag].isReady = true;
-          activeChunkOffsetRef.current = chunkOffset;
 
-          // Target frame is ready at exact localTime — perform instant switch
-          if (wasPlaying) {
-            targetVideo.play().catch(() => { });
-          } else {
-            targetVideo.pause();
-          }
-
-          setActiveLivePlayer(targetPlayerTag);
-          setLiveChunkState(chunkOffset, url);
-
-          if (currentVideo && currentVideo !== targetVideo) {
-            try { currentVideo.pause(); } catch (e) { }
-          }
+          // Swap to target player atomically
+          swapToLiveChunk(targetPlayerTag, chunkOffset, localTime);
 
           isSeekingLiveRef.current = false;
           pendingSeekTimeRef.current = null;
           isSeekingRef.current = false;
-          setIsVideoBuffering(false);
-
-          // Preload next required chunk (chunkOffset + 5) into other player
-          const nextOffset = chunkOffset + 5;
-          prefetchLiveChunk(nextOffset);
-          const cachedNext = getCachedLiveChunk(nextOffset);
-          const otherPlayerTag = targetPlayerTag === 'A' ? 'B' : 'A';
-          const otherVideo = otherPlayerTag === 'A' ? videoAElementRef.current : videoBElementRef.current;
-          if (cachedNext && otherVideo) {
-            playerSlotsRef.current[otherPlayerTag] = {
-              offset: nextOffset,
-              url: cachedNext,
-              isReady: false,
-            };
-            otherVideo.src = cachedNext;
-            otherVideo.load();
-          }
 
           console.log(`[Twitch LIVE ✅ SEEK COMPLETE] Gen ${currentGen} -> Player ${targetPlayerTag} @ chunk ${chunkOffset}s + local ${localTime.toFixed(2)}s`);
         } catch (err: any) {
@@ -1480,10 +1496,20 @@ export default function ClipFlowEditor() {
         try { youtubePlayerRef.current.playVideo(); } catch (e) { }
         setIsPlaying(true);
       }
+    } else if (isLiveChannelUrl) {
+      const activeTag = activeLivePlayerRef.current;
+      const standbyTag = activeTag === 'A' ? 'B' : 'A';
+      if (isPlaying) {
+        safePausePlayer('A');
+        safePausePlayer('B');
+        setIsPlaying(false);
+      } else {
+        safePausePlayer(standbyTag);
+        safePlayPlayer(activeTag);
+        setIsPlaying(true);
+      }
     } else {
-      const activeVideo = isLiveChannelUrl
-        ? (activeLivePlayer === 'A' ? videoAElementRef.current : videoBElementRef.current)
-        : videoElementRef.current;
+      const activeVideo = videoElementRef.current;
       if (activeVideo) {
         if (isPlaying) {
           activeVideo.pause();
@@ -1496,62 +1522,111 @@ export default function ClipFlowEditor() {
     }
   };
 
-  // Standby player decoding handler — resumes playback immediately when required chunk is ready
+  // Central atomic swap function for Live Twitch chunks
+  const swapToLiveChunk = useCallback((targetPlayerTag: 'A' | 'B', expectedOffset: number, initialLocalTime: number = 0) => {
+    const currentActiveTag = activeLivePlayerRef.current;
+    const oldOffset = activeChunkOffsetRef.current;
+    const targetSlot = playerSlotsRef.current[targetPlayerTag];
+    const targetVideo = targetPlayerTag === 'A' ? videoAElementRef.current : videoBElementRef.current;
+
+    // Strict validation: target must have the exact expected offset, valid URL, and be marked ready
+    if (!targetVideo || !targetSlot.url || targetSlot.offset !== expectedOffset || !targetSlot.isReady) {
+      console.log(`[LIVE SWAP REJECTED] target=${targetPlayerTag} expected=${expectedOffset} actualOffset=${targetSlot.offset} isReady=${targetSlot.isReady}`);
+      return;
+    }
+
+    // 1. Pause Player A
+    safePausePlayer('A');
+    // 2. Pause Player B
+    safePausePlayer('B');
+
+    // 3. Log the atomic swap
+    console.log(`[LIVE SWAP] ${currentActiveTag}(${oldOffset}) -> ${targetPlayerTag}(${expectedOffset})`);
+
+    // 4. Reset target currentTime
+    try {
+      targetVideo.currentTime = initialLocalTime;
+    } catch (e) { }
+
+    // 5. Set authoritative activePlayer / activeOffset and refs
+    const newActiveTag = targetPlayerTag;
+    const newStandbyTag = targetPlayerTag === 'A' ? 'B' : 'A';
+    activeLivePlayerRef.current = newActiveTag;
+    setActiveLivePlayer(newActiveTag);
+    activeChunkOffsetRef.current = expectedOffset;
+
+    // 6. Update ClipFlow timeline
+    setCurrentTime(expectedOffset + initialLocalTime);
+
+    // 7. Log authoritative source
+    console.log(`[LIVE SOURCE] Player=${newActiveTag} offset=${expectedOffset} url=${targetSlot.url.substring(0, 50)}...`);
+
+    // 8. Clear buffering flags
+    isBufferingAtBoundaryRef.current = false;
+    setIsVideoBuffering(false);
+
+    // 9. ONLY THEN play target player if isPlaying
+    if (isPlayingRef.current) {
+      safePlayPlayer(newActiveTag);
+    }
+
+    // 10. Prepare following chunk (expectedOffset + 5) in the now-inactive standby player (MUST REMAIN PAUSED)
+    const followingOffset = expectedOffset + 5;
+    prefetchLiveChunk(followingOffset);
+    const cachedFollowing = getCachedLiveChunk(followingOffset);
+    const standbyVideo = newStandbyTag === 'A' ? videoAElementRef.current : videoBElementRef.current;
+    const standbySlot = playerSlotsRef.current[newStandbyTag];
+    if (cachedFollowing && standbyVideo) {
+      if (standbySlot.offset !== followingOffset || standbySlot.url !== cachedFollowing) {
+        standbySlot.offset = followingOffset;
+        standbySlot.url = cachedFollowing;
+        standbySlot.isReady = false;
+        standbyVideo.src = cachedFollowing;
+        standbyVideo.load();
+      }
+    }
+  }, [safePausePlayer, safePlayPlayer, prefetchLiveChunk, getCachedLiveChunk]);
+
+  // Standby player decoding handler — marks ready and resumes playback ONLY via swapToLiveChunk
   const handleLivePlayerCanPlay = (playerTag: 'A' | 'B') => {
     const slot = playerSlotsRef.current[playerTag];
+    const video = playerTag === 'A' ? videoAElementRef.current : videoBElementRef.current;
+    if (!video || !slot.url) return;
+
+    // Mark slot ready
     slot.isReady = true;
+    console.log(`[LIVE READY] ${slot.offset} decoded in ${playerTag}`);
 
+    // If this is the active player (e.g. initial load or after seek) and playback is requested
+    if (playerTag === activeLivePlayerRef.current) {
+      if (isPlayingRef.current && video.paused) {
+        safePlayPlayer(playerTag);
+      }
+      return;
+    }
+
+    // If this is the standby player and we are currently stalled/buffering at the boundary waiting for this exact chunk
     const expectedNext = activeChunkOffsetRef.current + 5;
-    if (
-      isBufferingAtBoundaryRef.current &&
-      playerTag !== activeLivePlayer &&
-      slot.offset === expectedNext
-    ) {
-      console.log(`[TwitchLive ⚡ RESUMING STREAM] Chunk ${expectedNext}s decoded in standby Player ${playerTag}`);
-      const targetVideo = playerTag === 'A' ? videoAElementRef.current : videoBElementRef.current;
-      const oldVideo = activeLivePlayer === 'A' ? videoAElementRef.current : videoBElementRef.current;
-
-      if (targetVideo) {
-        targetVideo.currentTime = 0;
-        if (isPlaying) {
-          targetVideo.play().catch(() => { });
-        }
-      }
-      if (oldVideo) {
-        try { oldVideo.pause(); } catch (e) { }
-      }
-
-      isBufferingAtBoundaryRef.current = false;
-      setIsVideoBuffering(false);
-      activeChunkOffsetRef.current = expectedNext;
-      setActiveLivePlayer(playerTag);
-      advanceLiveChunk();
-
-      // Preload next following chunk
-      const followingOffset = expectedNext + 5;
-      prefetchLiveChunk(followingOffset);
-      const cachedFollowing = getCachedLiveChunk(followingOffset);
-      const nowStandbyTag = activeLivePlayer;
-      const nowStandbyVideo = nowStandbyTag === 'A' ? videoAElementRef.current : videoBElementRef.current;
-      if (cachedFollowing && nowStandbyVideo) {
-        playerSlotsRef.current[nowStandbyTag] = {
-          offset: followingOffset,
-          url: cachedFollowing,
-          isReady: false,
-        };
-        nowStandbyVideo.src = cachedFollowing;
-        nowStandbyVideo.load();
-      }
+    if (isBufferingAtBoundaryRef.current && slot.offset === expectedNext) {
+      console.log(`[LIVE BUFFER RESOLVED] ${expectedNext} ready in standby Player ${playerTag}`);
+      swapToLiveChunk(playerTag, expectedNext, 0);
     }
   };
 
   // Seamless live chunk transition handlers for strictly ordered double buffering
   const handleLiveTimeUpdate = (e: React.SyntheticEvent<HTMLVideoElement>, playerTag: 'A' | 'B') => {
     const v = e.currentTarget;
-    if (playerTag !== activeLivePlayer) return;
+    const activeTag = activeLivePlayerRef.current;
+    const activeOffset = activeChunkOffsetRef.current;
+    const slot = playerSlotsRef.current[playerTag];
+
+    // STRICT STALE EVENT IGNORE GUARD
+    if (playerTag !== activeTag || slot.offset !== activeOffset) {
+      console.log(`[LIVE IGNORE STALE] Player=${playerTag} offset=${slot.offset} (active=${activeTag}@${activeOffset})`);
+      return;
+    }
     if (isSeekingLiveRef.current) return;
 
-    const activeOffset = activeChunkOffsetRef.current;
     const currentTimelineTime = activeOffset + v.currentTime;
     setCurrentTime(currentTimelineTime);
     notifyLivePlaybackProgress(v.currentTime);
@@ -1562,7 +1637,7 @@ export default function ClipFlowEditor() {
     const standbySlot = playerSlotsRef.current[standbyTag];
     const standbyVideo = standbyTag === 'A' ? videoAElementRef.current : videoBElementRef.current;
 
-    // Ensure standby player has the exact expectedNext chunk URL assigned if cached
+    // Ensure standby player has the exact expectedNext chunk assigned if cached
     const cachedNextUrl = getCachedLiveChunk(expectedNext);
     if (cachedNextUrl && standbyVideo && (standbySlot.offset !== expectedNext || standbySlot.url !== cachedNextUrl)) {
       standbySlot.offset = expectedNext;
@@ -1572,48 +1647,24 @@ export default function ClipFlowEditor() {
       standbyVideo.load();
     }
 
-    // When within 80ms of end (or >= 4.92s for 5s chunk)
+    // Boundary check: within 80ms of end
     if (v.currentTime >= actualDur - 0.08 || (actualDur <= 5.0 && v.currentTime >= 4.92)) {
-      if (standbySlot.offset === expectedNext && (standbySlot.isReady || (standbyVideo && standbyVideo.readyState >= 2))) {
+      if (standbySlot.offset === expectedNext && standbySlot.isReady) {
         // STRICT SWAP: Next exact chunk is ready
-        console.log(`[TwitchLive ⚡ STRICT SWAP] ${playerTag}(${activeOffset}s) -> ${standbyTag}(${expectedNext}s)`);
-        if (isPlaying && standbyVideo) {
-          standbyVideo.currentTime = 0;
-          standbyVideo.play().catch(() => { });
-        }
-        try { v.pause(); } catch (e) { }
-        isBufferingAtBoundaryRef.current = false;
-        setIsVideoBuffering(false);
-        activeChunkOffsetRef.current = expectedNext;
-        setActiveLivePlayer(standbyTag);
-        advanceLiveChunk();
-
-        // Prefetch next chunk
-        const followingOffset = expectedNext + 5;
-        prefetchLiveChunk(followingOffset);
-        const cachedFollowing = getCachedLiveChunk(followingOffset);
-        if (cachedFollowing && v) {
-          playerSlotsRef.current[playerTag] = {
-            offset: followingOffset,
-            url: cachedFollowing,
-            isReady: false,
-          };
-          v.src = cachedFollowing;
-          v.load();
-        }
+        swapToLiveChunk(standbyTag, expectedNext, 0);
       } else {
-        // STANDBY NOT READY: STOP AT BOUNDARY, DO NOT LOOP OLD CHUNK!
+        // STANDBY NOT READY: STOP AT BOUNDARY, HOLD POSITION, DO NOT LOOP OLD CHUNK!
         if (!isBufferingAtBoundaryRef.current) {
-          console.log(`[TwitchLive ⏸️ BUFFERING AT BOUNDARY] Holding @ ${expectedNext}s (waiting for required chunk ${expectedNext}s)`);
+          console.log(`[LIVE BUFFER] waiting for ${expectedNext}`);
           isBufferingAtBoundaryRef.current = true;
+          safePausePlayer(playerTag);
           try {
-            v.pause();
             v.currentTime = Math.min(actualDur - 0.02, 4.98);
           } catch (e) { }
           setIsVideoBuffering(true);
           setCurrentTime(expectedNext);
 
-          // Ensure expectedNext chunk is actively being fetched
+          // Fetch the exact next chunk
           getLiveChunk(expectedNext).then((url) => {
             if (standbyVideo && (standbySlot.offset !== expectedNext || standbySlot.url !== url)) {
               standbySlot.offset = expectedNext;
@@ -1623,7 +1674,7 @@ export default function ClipFlowEditor() {
               standbyVideo.load();
             }
           }).catch((err) => {
-            console.error('[TwitchLive Boundary Load Error]', err);
+            console.error('[LIVE BUFFER ERROR]', err);
           });
         }
       }
@@ -1631,62 +1682,44 @@ export default function ClipFlowEditor() {
   };
 
   const handleLiveEnded = (playerTag: 'A' | 'B') => {
-    if (playerTag !== activeLivePlayer) return;
+    const activeTag = activeLivePlayerRef.current;
+    const activeOffset = activeChunkOffsetRef.current;
+    const slot = playerSlotsRef.current[playerTag];
+
+    if (playerTag !== activeTag || slot.offset !== activeOffset) {
+      console.log(`[LIVE IGNORE STALE] Player=${playerTag} offset=${slot.offset} (ended)`);
+      return;
+    }
     if (isSeekingLiveRef.current) return;
 
-    const activeOffset = activeChunkOffsetRef.current;
+    safePausePlayer(playerTag);
+
     const expectedNext = activeOffset + 5;
     const standbyTag = playerTag === 'A' ? 'B' : 'A';
     const standbySlot = playerSlotsRef.current[standbyTag];
     const standbyVideo = standbyTag === 'A' ? videoAElementRef.current : videoBElementRef.current;
-    const currentVideo = playerTag === 'A' ? videoAElementRef.current : videoBElementRef.current;
 
-    if (currentVideo) {
-      try { currentVideo.pause(); } catch (e) { }
-    }
-
-    if (standbySlot.offset === expectedNext && (standbySlot.isReady || (standbyVideo && standbyVideo.readyState >= 2))) {
-      console.log(`[TwitchLive ⚡ ENDED SWAP] ${playerTag}(${activeOffset}s) -> ${standbyTag}(${expectedNext}s)`);
-      if (isPlaying && standbyVideo) {
-        standbyVideo.currentTime = 0;
-        standbyVideo.play().catch(() => { });
-      }
-      isBufferingAtBoundaryRef.current = false;
-      setIsVideoBuffering(false);
-      activeChunkOffsetRef.current = expectedNext;
-      setActiveLivePlayer(standbyTag);
-      advanceLiveChunk();
-
-      // Prefetch following chunk
-      const followingOffset = expectedNext + 5;
-      prefetchLiveChunk(followingOffset);
-      const cachedFollowing = getCachedLiveChunk(followingOffset);
-      if (cachedFollowing && currentVideo) {
-        playerSlotsRef.current[playerTag] = {
-          offset: followingOffset,
-          url: cachedFollowing,
-          isReady: false,
-        };
-        currentVideo.src = cachedFollowing;
-        currentVideo.load();
-      }
+    if (standbySlot.offset === expectedNext && standbySlot.isReady) {
+      swapToLiveChunk(standbyTag, expectedNext, 0);
     } else {
-      console.log(`[TwitchLive ⏸️ ENDED BUFFERING] Waiting for chunk ${expectedNext}s`);
-      isBufferingAtBoundaryRef.current = true;
-      setIsVideoBuffering(true);
-      setCurrentTime(expectedNext);
+      if (!isBufferingAtBoundaryRef.current) {
+        console.log(`[LIVE BUFFER] waiting for ${expectedNext}`);
+        isBufferingAtBoundaryRef.current = true;
+        setIsVideoBuffering(true);
+        setCurrentTime(expectedNext);
 
-      getLiveChunk(expectedNext).then((url) => {
-        if (standbyVideo && (standbySlot.offset !== expectedNext || standbySlot.url !== url)) {
-          standbySlot.offset = expectedNext;
-          standbySlot.url = url;
-          standbySlot.isReady = false;
-          standbyVideo.src = url;
-          standbyVideo.load();
-        }
-      }).catch((err) => {
-        console.error('[TwitchLive Ended Load Error]', err);
-      });
+        getLiveChunk(expectedNext).then((url) => {
+          if (standbyVideo && (standbySlot.offset !== expectedNext || standbySlot.url !== url)) {
+            standbySlot.offset = expectedNext;
+            standbySlot.url = url;
+            standbySlot.isReady = false;
+            standbyVideo.src = url;
+            standbyVideo.load();
+          }
+        }).catch((err) => {
+          console.error('[LIVE BUFFER ERROR]', err);
+        });
+      }
     }
   };
 
@@ -2457,9 +2490,9 @@ export default function ClipFlowEditor() {
                             />
                           </div>
                         ) : (
-                          <video
-                            ref={videoElementRef}
-                            src={isHls && Hls.isSupported() ? undefined : activeVideoSrc}
+                            <video
+                              ref={videoElementRef}
+                              src={isHls && Hls.isSupported() ? undefined : (activeVideoSrc || undefined)}
                             preload="auto"
                             playsInline
                             muted={isMuted}
