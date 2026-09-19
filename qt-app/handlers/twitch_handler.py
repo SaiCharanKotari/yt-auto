@@ -294,10 +294,13 @@ def extract_twitch_live_segment(
             "-ss", str(start_time),
             "-i", stream_url,
             "-t", str(chunk_duration),
-            "-c", "copy",
+            "-map", "0:v:0",
+            "-map", "0:a:0?",
+            "-c:v", "copy",
+            "-c:a", "copy",
             "-avoid_negative_ts", "make_zero",
+            "-fflags", "+genpts+discardcorrupt",
             "-movflags", "+faststart",
-            "-bsf:a", "aac_adtstoasc",
             str(output_path)
         ]
 
@@ -325,9 +328,12 @@ def extract_twitch_live_segment(
                     "-ss", str(start_time),
                     "-i", stream_url,
                     "-t", str(chunk_duration),
+                    "-map", "0:v:0",
+                    "-map", "0:a:0?",
                     "-c:v", "libx264",
                     "-preset", "ultrafast",
                     "-tune", "zerolatency",
+                    "-threads", "4",
                     "-crf", "26",
                     "-c:a", "aac",
                     "-b:a", "128k",

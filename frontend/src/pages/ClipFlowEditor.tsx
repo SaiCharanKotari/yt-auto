@@ -819,8 +819,9 @@ export default function ClipFlowEditor() {
         }
       }).catch(() => {});
 
-      // Pipeline prefetch chunk + 10 ahead of time
+      // Pipeline prefetch chunk + 10 and chunk + 15 ahead of time
       prefetchLiveChunk(expectedNext + 5);
+      prefetchLiveChunk(expectedNext + 10);
     }
   }, [isLiveChannelUrl, liveChunkUrl, liveChunkOffset, getLiveChunk, prefetchLiveChunk]);
 
@@ -1590,8 +1591,9 @@ export default function ClipFlowEditor() {
       }
     }).catch(() => {});
 
-    // Pipeline prefetch chunk + 10 ahead of time
+    // Pipeline prefetch chunk + 10 and chunk + 15 ahead of time
     prefetchLiveChunk(followingOffset + 5);
+    prefetchLiveChunk(followingOffset + 10);
   }, [safePausePlayer, safePlayPlayer, getLiveChunk, prefetchLiveChunk]);
 
   // Standby player decoding handler — marks ready and resumes playback ONLY via swapToLiveChunk
