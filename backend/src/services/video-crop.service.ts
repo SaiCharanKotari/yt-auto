@@ -120,11 +120,12 @@ export function buildCropWorkflow(
     aspectRatio = '16:9',
     fitMode = 'pad',
     cropPosition = 'center',
+    cropBox,
     customFileName,
   } = options;
 
   const isAudio = format === 'mp3' || format === 'wav' || format === 'm4a' || format === 'aac';
-  const filterString = !isAudio ? getFFmpegAspectFilter(aspectRatio, fitMode, cropPosition) : '';
+  const filterString = !isAudio ? getFFmpegAspectFilter(aspectRatio, fitMode, cropPosition, cropBox) : '';
   const isCroppingNeeded = !isAudio && Boolean(filterString);
 
   // Determine base sanitized name
@@ -152,17 +153,24 @@ export function buildCropWorkflow(
   );
 
   // Step 2: FFmpeg crop/pad command
-  const ffmpegCmd = `.\\ffmpeg.exe -i "${tempRawPath}" -vf "${filterString}" -c:v libx264 -preset fast -crf 20 -c:a aac -y "${finalOutputPath}"`;
+  const ffmpegCmd = `& "${FFMPEG_BIN}" -i "${tempRawPath}" -vf "${filterString}" -c:v libx264 -preset fast -crf 20 -c:a copy -y "${finalOutputPath}"`;
 
-  // Step 3: Delete intermediate raw video
-  const cleanupCmd = `if (Test-Path "${tempRawPath}") { Remove-Item -Path "${tempRawPath}" -Force }`;
+  // Step 3: Delete raw temp video
+  const cleanupCmd = `Remove-Item -Path "${tempRawPath}" -Force -ErrorAction SilentlyContinue`;
 
-  // Combined PowerShell workflow
+  // Combined PowerShell workflow script
   const powerShellScript = [
+    `# ClipFlow Video Aspect Pipeline (${aspectRatio} - ${fitMode})`,
     adjustedYtDlpCmd,
-    ffmpegCmd,
-    cleanupCmd,
-  ].join('\n\n');
+    `if ($LASTEXITCODE -eq 0) {`,
+    `    Write-Host "Framing video to ${aspectRatio}..." -ForegroundColor Cyan`,
+    `    ${ffmpegCmd}`,
+    `    if ($LASTEXITCODE -eq 0) {`,
+    `        ${cleanupCmd}`,
+    `        Write-Host "Success! Saved to ${finalOutputPath}" -ForegroundColor Green`,
+    `    }`,
+    `}`,
+  ].join('\r\n');
 
   return {
     isCroppingNeeded: true,
@@ -175,16 +183,18 @@ export function buildCropWorkflow(
 }
 
 /**
- * Programmatic Node.js cropping utility using FFmpeg binary
+ * Node-side video cropper (for cloud / server jobs).
  */
 export async function cropVideoFile(params: {
   inputPath: string;
   outputPath: string;
   aspectRatio: string;
   fitMode?: 'crop' | 'pad';
+  cropPosition?: 'left' | 'center' | 'right';
+  cropBox?: CropBoxCoordinates;
 }): Promise<string> {
-  const { inputPath, outputPath, aspectRatio, fitMode = 'pad' } = params;
-  const filter = getFFmpegAspectFilter(aspectRatio, fitMode);
+  const { inputPath, outputPath, aspectRatio, fitMode = 'pad', cropPosition = 'center', cropBox } = params;
+  const filter = getFFmpegAspectFilter(aspectRatio, fitMode, cropPosition, cropBox);
 
   if (!filter) {
     throw new Error(`Invalid or unsupported aspect ratio: ${aspectRatio}`);

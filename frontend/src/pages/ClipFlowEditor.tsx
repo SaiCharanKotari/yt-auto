@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo } from 'react';
+import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
@@ -161,6 +161,7 @@ export default function ClipFlowEditor() {
   const videoElementRef = useRef<HTMLVideoElement | null>(null);
   const sliderWrapRef = useRef<HTMLDivElement>(null);
   const videoContainerRef = useRef<HTMLDivElement>(null);
+  const videoCanvasRef = useRef<HTMLDivElement>(null);
   const isSeekingRef = useRef<boolean>(false);
   const pendingSeekTimeRef = useRef<number | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -244,6 +245,30 @@ export default function ClipFlowEditor() {
   const [aspectRatio, setAspectRatio] = useState<'16:9' | '9:16' | '1:1' | '4:5' | 'custom'>(initialSession?.aspectRatio || '16:9');
   const [cropBox, setCropBox] = useState<CropBox>(initialSession?.cropBox || { x: 0.25, y: 0, width: 0.5, height: 1 });
   const [containerDims, setContainerDims] = useState<{ width: number; height: number }>({ width: 0, height: 0 });
+  const [videoDimensions, setVideoDimensions] = useState<{ width: number; height: number }>({
+    width: initialSession?.metadata?.width || 1920,
+    height: initialSession?.metadata?.height || 1080,
+  });
+  const outputCanvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  // Sync videoDimensions if metadata arrives with width/height
+  useEffect(() => {
+    if (metadata?.width && metadata?.height && metadata.width > 0 && metadata.height > 0) {
+      setVideoDimensions({ width: metadata.width, height: metadata.height });
+    }
+  }, [metadata]);
+
+  // Source aspect ratio (from real video pixels or reliable metadata)
+  const sourceAspectRatio = useMemo(() => {
+    if (videoDimensions.width > 0 && videoDimensions.height > 0) {
+      return videoDimensions.width / videoDimensions.height;
+    }
+    if (metadata?.width && metadata?.height && metadata.width > 0 && metadata.height > 0) {
+      return metadata.width / metadata.height;
+    }
+    return 16 / 9;
+  }, [videoDimensions.width, videoDimensions.height, metadata]);
+
   const [fitMode, setFitMode] = useState<'crop' | 'pad'>(initialSession?.fitMode || 'crop');
   void setFitMode;
   const [cropPosition, setCropPosition] = useState<'center' | 'left' | 'right'>(initialSession?.cropPosition || 'center');
@@ -303,7 +328,7 @@ export default function ClipFlowEditor() {
 
   // Track Video Container Dimensions for Accurate Crop Framing Math
   useEffect(() => {
-    const el = videoContainerRef.current;
+    const el = videoCanvasRef.current || videoContainerRef.current;
     if (!el) return;
     const updateDims = () => {
       if (el) setContainerDims({ width: el.clientWidth, height: el.clientHeight });
@@ -312,7 +337,7 @@ export default function ClipFlowEditor() {
     const ro = new ResizeObserver(updateDims);
     ro.observe(el);
     return () => ro.disconnect();
-  }, [metadata, videoHeight]);
+  }, [metadata, videoHeight, sourceAspectRatio]);
 
   // Compute clean, standard preview qualities and default stream (Priority: 1080p -> 720p -> highest available)
   const { previewQualities, defaultPreviewStreamUrl } = useMemo(() => {
@@ -1431,15 +1456,34 @@ export default function ClipFlowEditor() {
     setAspectRatio(ratio);
     if (ratio === '16:9') {
       setCropBox({ x: 0, y: 0, width: 1, height: 1 });
-    } else if (ratio === '9:16') {
-      const w = 81 / 256; // 0.3164
-      setCropBox({ x: (1 - w) / 2, y: 0, width: w, height: 1 });
-    } else if (ratio === '1:1') {
-      const w = 9 / 16; // 0.5625
-      setCropBox({ x: (1 - w) / 2, y: 0, width: w, height: 1 });
-    } else if (ratio === '4:5') {
-      const w = 0.45;
-      setCropBox({ x: (1 - w) / 2, y: 0, width: w, height: 1 });
+    } else if (ratio === '9:16' || ratio === '1:1' || ratio === '4:5') {
+      let targetRatio = 1;
+      if (ratio === '9:16') targetRatio = 9 / 16;
+      else if (ratio === '1:1') targetRatio = 1;
+      else if (ratio === '4:5') targetRatio = 4 / 5;
+
+      let w = 1;
+      let h = 1;
+      if (targetRatio < sourceAspectRatio) {
+        h = 1;
+        w = Math.min(1, targetRatio / sourceAspectRatio);
+      } else {
+        w = 1;
+        h = Math.min(1, sourceAspectRatio / targetRatio);
+      }
+      setCropBox({
+        x: Math.max(0, (1 - w) / 2),
+        y: Math.max(0, (1 - h) / 2),
+        width: w,
+        height: h,
+      });
+    } else if (ratio === 'custom') {
+      setCropBox((prev) => {
+        if (prev.width === 1 && prev.height === 1) {
+          return { x: 0.25, y: 0.1, width: 0.5, height: 0.8 };
+        }
+        return prev;
+      });
     }
   };
 
@@ -1465,6 +1509,110 @@ export default function ClipFlowEditor() {
       setCropPosition('right');
     }
   };
+
+
+
+  // Real Output Aspect Ratio:
+  // For Custom: sourceAspectRatio * (cropBox.width / cropBox.height) = (videoWidth * cropBox.width) / (videoHeight * cropBox.height)
+  // For Presets: exact fixed preset ratios
+  const outputAspectRatioValue = useMemo(() => {
+    if (aspectRatio === '16:9') return 16 / 9;
+    if (aspectRatio === '9:16') return 9 / 16;
+    if (aspectRatio === '1:1') return 1;
+    if (aspectRatio === '4:5') return 4 / 5;
+    const h = cropBox.height > 0 ? cropBox.height : 1;
+    const w = cropBox.width > 0 ? cropBox.width : 1;
+    return sourceAspectRatio * (w / h);
+  }, [aspectRatio, cropBox.width, cropBox.height, sourceAspectRatio]);
+
+  // Real-time Canvas Frame Extractor & Output Preview Renderer
+  const renderOutputPreview = useCallback(() => {
+    const canvas = outputCanvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    // Grab frame from active video element (supports Twitch live double-buffered Player A/B and standard player)
+    const activeVideo = isLiveChannelUrl
+      ? (activeLivePlayer === 'A' ? videoAElementRef.current : videoBElementRef.current)
+      : videoElementRef.current;
+
+    if (
+      activeVideo &&
+      activeVideo.readyState >= 2 &&
+      activeVideo.videoWidth > 0 &&
+      activeVideo.videoHeight > 0
+    ) {
+      const vw = activeVideo.videoWidth;
+      const vh = activeVideo.videoHeight;
+
+      if (videoDimensions.width !== vw || videoDimensions.height !== vh) {
+        setVideoDimensions({ width: vw, height: vh });
+      }
+
+      const sx = Math.max(0, Math.min(vw - 1, (cropBox.x || 0) * vw));
+      const sy = Math.max(0, Math.min(vh - 1, (cropBox.y || 0) * vh));
+      const sw = Math.max(1, Math.min(vw - sx, (cropBox.width || 1) * vw));
+      const sh = Math.max(1, Math.min(vh - sy, (cropBox.height || 1) * vh));
+
+      const targetW = Math.round(sw);
+      const targetH = Math.round(sh);
+      if (canvas.width !== targetW || canvas.height !== targetH) {
+        canvas.width = targetW;
+        canvas.height = targetH;
+      }
+
+      try {
+        ctx.drawImage(activeVideo, sx, sy, sw, sh, 0, 0, targetW, targetH);
+        return;
+      } catch {
+        // Fall through to image fallback on CORS block
+      }
+    }
+
+    // Fallback: If YouTube or video element not ready yet, draw from thumbnail
+    const thumbSrc = metadata?.thumbnail || (youtubeId ? `https://img.youtube.com/vi/${youtubeId}/maxresdefault.jpg` : '');
+    if (thumbSrc) {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.src = thumbSrc;
+      img.onload = () => {
+        const iw = img.naturalWidth || 1920;
+        const ih = img.naturalHeight || 1080;
+        const sx = Math.max(0, Math.min(iw - 1, (cropBox.x || 0) * iw));
+        const sy = Math.max(0, Math.min(ih - 1, (cropBox.y || 0) * ih));
+        const sw = Math.max(1, Math.min(iw - sx, (cropBox.width || 1) * iw));
+        const sh = Math.max(1, Math.min(ih - sy, (cropBox.height || 1) * ih));
+
+        const targetW = Math.round(sw);
+        const targetH = Math.round(sh);
+        if (canvas.width !== targetW || canvas.height !== targetH) {
+          canvas.width = targetW;
+          canvas.height = targetH;
+        }
+        try {
+          ctx.drawImage(img, sx, sy, sw, sh, 0, 0, targetW, targetH);
+        } catch {}
+      };
+    }
+  }, [isLiveChannelUrl, activeLivePlayer, cropBox, metadata, youtubeId, videoDimensions.width, videoDimensions.height]);
+
+  // Synchronize canvas output preview on seek, timeupdate, crop change, or ratio change
+  useEffect(() => {
+    renderOutputPreview();
+  }, [renderOutputPreview, currentTime, cropBox, aspectRatio]);
+
+  // Smooth continuous canvas output preview rendering while video is playing
+  useEffect(() => {
+    if (!isPlaying) return;
+    let animId: number;
+    const loop = () => {
+      renderOutputPreview();
+      animId = requestAnimationFrame(loop);
+    };
+    animId = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(animId);
+  }, [isPlaying, renderOutputPreview]);
 
   // Seek backward/forward by seconds
   const seekRelative = (seconds: number) => {
@@ -1973,7 +2121,13 @@ export default function ClipFlowEditor() {
                       }`}
                   >
                     {/* Universal HTML5 Video Canvas with Interactive Framing Overlay */}
-                    <div className="relative w-full h-full bg-black rounded-xl overflow-hidden flex items-center justify-center shadow-2xl border border-white/10 select-none">
+                    <div
+                      ref={videoCanvasRef}
+                      style={{
+                        aspectRatio: `${sourceAspectRatio}`,
+                      }}
+                      className="relative h-full max-h-full max-w-full w-auto bg-black rounded-xl overflow-hidden flex items-center justify-center shadow-2xl border border-white/10 select-none"
+                    >
                       <div className="w-full h-full relative flex items-center justify-center overflow-hidden bg-black">
                         {youtubeId ? (
                           <div className="w-full h-full relative flex items-center justify-center overflow-hidden pointer-events-none select-none">
@@ -2063,6 +2217,9 @@ export default function ClipFlowEditor() {
                                 const v = e.currentTarget;
                                 v.volume = volume;
                                 v.muted = isMuted;
+                                if (v.videoWidth > 0 && v.videoHeight > 0) {
+                                  setVideoDimensions({ width: v.videoWidth, height: v.videoHeight });
+                                }
                               }}
                               onTimeUpdate={(e) => handleLiveTimeUpdate(e, 'A')}
                               onEnded={() => handleLiveEnded('A')}
@@ -2081,6 +2238,9 @@ export default function ClipFlowEditor() {
                                 const v = e.currentTarget;
                                 v.volume = volume;
                                 v.muted = isMuted;
+                                if (v.videoWidth > 0 && v.videoHeight > 0) {
+                                  setVideoDimensions({ width: v.videoWidth, height: v.videoHeight });
+                                }
                               }}
                               onTimeUpdate={(e) => handleLiveTimeUpdate(e, 'B')}
                               onEnded={() => handleLiveEnded('B')}
@@ -2165,6 +2325,9 @@ export default function ClipFlowEditor() {
                               const v = e.currentTarget;
                               v.volume = volume;
                               v.muted = isMuted;
+                              if (v.videoWidth > 0 && v.videoHeight > 0) {
+                                setVideoDimensions({ width: v.videoWidth, height: v.videoHeight });
+                              }
                               setIsVideoBuffering(false);
 
                               if (isLiveChannelUrl) {
@@ -2279,6 +2442,7 @@ export default function ClipFlowEditor() {
                             containerWidth={containerDims.width || 800}
                             containerHeight={containerDims.height || 450}
                             aspectRatio={aspectRatio}
+                            sourceAspectRatio={sourceAspectRatio}
                           />
                         )}
                       </div>
@@ -2870,13 +3034,13 @@ export default function ClipFlowEditor() {
                     })}
                   </div>
 
-                  {/* Interactive Crop Frame Controls */}
+                  {/* Interactive Crop Frame Controls & Real-Time Output Preview */}
                   {aspectRatio !== '16:9' && (
-                    <div className="space-y-2.5 p-3 rounded-xl bg-zinc-950/90 border border-white/10">
+                    <div className="space-y-3 p-3 rounded-xl bg-zinc-950/90 border border-white/10">
                       <div className="flex items-center justify-between">
                         <span className="text-[11px] font-semibold text-zinc-200 flex items-center gap-1.5">
                           <Crop className="w-3.5 h-3.5 text-zinc-400" />
-                          <span>Interactive Framing</span>
+                          <span>Output Preview</span>
                         </span>
                         <div className="flex items-center gap-1.5">
                           <button
@@ -2895,6 +3059,33 @@ export default function ClipFlowEditor() {
                           >
                             Reset
                           </button>
+                        </div>
+                      </div>
+
+                      {/* Live Cropped Output Preview Box */}
+                      <div className="w-full bg-black/60 rounded-xl p-2.5 border border-white/10 flex flex-col items-center justify-center gap-2">
+                        <div
+                          className="relative bg-black rounded-lg overflow-hidden border border-white/20 shadow-xl flex items-center justify-center max-h-[190px] w-auto max-w-full transition-all duration-75 select-none"
+                          style={{
+                            aspectRatio: `${outputAspectRatioValue}`,
+                          }}
+                        >
+                          <canvas
+                            ref={outputCanvasRef}
+                            className="w-full h-full object-contain pointer-events-none select-none block"
+                          />
+                        </div>
+
+                        {/* Ratio & Dimension Info */}
+                        <div className="flex items-center justify-between w-full px-1 text-[10px] text-zinc-400 font-mono">
+                          <span className="text-purple-300 font-bold">
+                            {aspectRatio === 'custom'
+                              ? `Ratio: ${outputAspectRatioValue >= 1 ? `${outputAspectRatioValue.toFixed(2)}:1` : `1:${(1 / outputAspectRatioValue).toFixed(2)}`}`
+                              : `Ratio: ${aspectRatio}`}
+                          </span>
+                          <span className="text-zinc-300">
+                            {`${Math.round(cropBox.width * 100)}%w × ${Math.round(cropBox.height * 100)}%h`}
+                          </span>
                         </div>
                       </div>
                     </div>

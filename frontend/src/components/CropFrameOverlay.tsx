@@ -13,6 +13,7 @@ interface CropFrameOverlayProps {
   onChange: (newBox: CropBox) => void;
   containerWidth: number;
   containerHeight: number;
+  sourceAspectRatio?: number;
 }
 
 export const CropFrameOverlay: React.FC<CropFrameOverlayProps> = ({
@@ -21,6 +22,7 @@ export const CropFrameOverlay: React.FC<CropFrameOverlayProps> = ({
   onChange,
   containerWidth,
   containerHeight,
+  sourceAspectRatio,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const [isDragging, setIsDragging] = useState(false);
@@ -34,7 +36,7 @@ export const CropFrameOverlay: React.FC<CropFrameOverlayProps> = ({
     initialBox: CropBox;
   } | null>(null);
 
-  // Update box when aspect ratio changes if needed
+  // Update box when preset aspect ratio changes if needed
   useEffect(() => {
     if (aspectRatio === '16:9') {
       onChange({ x: 0, y: 0, width: 1, height: 1 });
@@ -48,17 +50,17 @@ export const CropFrameOverlay: React.FC<CropFrameOverlayProps> = ({
 
     if (aspectRatio !== 'custom' && containerWidth > 0 && containerHeight > 0) {
       // Calculate normalized width and height preserving video canvas aspect
-      const containerAspect = containerWidth / containerHeight;
+      const containerAspect = sourceAspectRatio || (containerWidth / containerHeight);
       let w = 1;
       let h = 1;
 
       if (targetRatio < containerAspect) {
         // Narrower than container (e.g. 9:16 in 16:9 container)
         h = 1;
-        w = Math.min(1, (targetRatio / containerAspect));
+        w = Math.min(1, targetRatio / containerAspect);
       } else {
         w = 1;
-        h = Math.min(1, (containerAspect / targetRatio));
+        h = Math.min(1, containerAspect / targetRatio);
       }
 
       // Clamp current X and Y with new dimensions
@@ -66,7 +68,7 @@ export const CropFrameOverlay: React.FC<CropFrameOverlayProps> = ({
       const newY = Math.max(0, Math.min(cropBox.y, 1 - h));
       onChange({ x: newX, y: newY, width: w, height: h });
     }
-  }, [aspectRatio, containerWidth, containerHeight]);
+  }, [aspectRatio, containerWidth, containerHeight, sourceAspectRatio]);
 
   const handleMouseDownBox = (e: React.MouseEvent) => {
     e.preventDefault();
@@ -114,34 +116,42 @@ export const CropFrameOverlay: React.FC<CropFrameOverlayProps> = ({
       let newW = init.width;
       let newH = init.height;
 
-      const minSize = 0.15; // Minimum 15% size
+      const minSize = 0.05; // Flexible minimum size
 
-      if (activeHandle.includes('right')) {
+      if (activeHandle === 'right' || activeHandle.includes('right')) {
         newW = Math.max(minSize, Math.min(1 - init.x, init.width + deltaX));
       }
-      if (activeHandle.includes('left')) {
+      if (activeHandle === 'left' || activeHandle.includes('left')) {
         const potentialW = init.width - deltaX;
-        if (potentialW >= minSize && init.x + deltaX >= 0) {
-          newX = init.x + deltaX;
+        const potentialX = init.x + deltaX;
+        if (potentialW >= minSize && potentialX >= 0) {
+          newX = potentialX;
           newW = potentialW;
+        } else if (potentialX < 0) {
+          newX = 0;
+          newW = init.x + init.width;
         }
       }
-      if (activeHandle.includes('bottom')) {
+      if (activeHandle === 'bottom' || activeHandle.includes('bottom')) {
         newH = Math.max(minSize, Math.min(1 - init.y, init.height + deltaY));
       }
-      if (activeHandle.includes('top')) {
+      if (activeHandle === 'top' || activeHandle.includes('top')) {
         const potentialH = init.height - deltaY;
-        if (potentialH >= minSize && init.y + deltaY >= 0) {
-          newY = init.y + deltaY;
+        const potentialY = init.y + deltaY;
+        if (potentialH >= minSize && potentialY >= 0) {
+          newY = potentialY;
           newH = potentialH;
+        } else if (potentialY < 0) {
+          newY = 0;
+          newH = init.y + init.height;
         }
       }
 
       onChange({
-        x: Math.max(0, newX),
-        y: Math.max(0, newY),
-        width: Math.min(1, newW),
-        height: Math.min(1, newH),
+        x: Math.max(0, Math.min(1 - newW, newX)),
+        y: Math.max(0, Math.min(1 - newH, newY)),
+        width: Math.max(minSize, Math.min(1 - newX, newW)),
+        height: Math.max(minSize, Math.min(1 - newY, newH)),
       });
     }
   }, [isDragging, dragStart, activeHandle, resizeStart, cropBox, containerWidth, containerHeight, onChange]);
@@ -172,6 +182,10 @@ export const CropFrameOverlay: React.FC<CropFrameOverlayProps> = ({
   const topPercent = cropBox.y * 100;
   const widthPercent = cropBox.width * 100;
   const heightPercent = cropBox.height * 100;
+
+  // Real pixel-aware aspect ratio of the custom crop
+  const sourceRatio = sourceAspectRatio || (containerWidth > 0 && containerHeight > 0 ? containerWidth / containerHeight : 16 / 9);
+  const realCustomOutputRatio = sourceRatio * (cropBox.width / (cropBox.height || 1));
 
   return (
     <div
@@ -242,7 +256,9 @@ export const CropFrameOverlay: React.FC<CropFrameOverlayProps> = ({
           <span>{aspectRatio.toUpperCase()}</span>
           <span className="text-zinc-500">•</span>
           <span className="text-zinc-400 text-[9px] font-mono">
-            {Math.round(cropBox.x * 100)}%
+            {aspectRatio === 'custom'
+              ? `${realCustomOutputRatio >= 1 ? `${realCustomOutputRatio.toFixed(2)}:1` : `1:${(1 / realCustomOutputRatio).toFixed(2)}`}`
+              : `${Math.round(cropBox.x * 100)}%`}
           </span>
         </div>
 
@@ -252,24 +268,51 @@ export const CropFrameOverlay: React.FC<CropFrameOverlayProps> = ({
         <div className="absolute -bottom-1 -left-1 w-3 h-3 border-b-2 border-l-2 border-white rounded-bl-sm pointer-events-none" />
         <div className="absolute -bottom-1 -right-1 w-3 h-3 border-b-2 border-r-2 border-white rounded-br-sm pointer-events-none" />
 
-        {/* Custom Resize Handles (Only in Custom Mode) */}
+        {/* Custom Resize Handles (Corner & Edge Handles in Custom Mode) */}
         {aspectRatio === 'custom' && (
           <>
+            {/* Corner Handles */}
             <div
               onMouseDown={(e) => handleMouseDownHandle('top-left', e)}
-              className="absolute -top-1.5 -left-1.5 w-3.5 h-3.5 bg-white border border-black rounded-full cursor-nwse-resize shadow pointer-events-auto"
+              className="absolute -top-1.5 -left-1.5 w-3.5 h-3.5 bg-white border border-black rounded-full cursor-nwse-resize shadow pointer-events-auto hover:scale-125 transition-transform"
+              title="Resize Top-Left"
             />
             <div
               onMouseDown={(e) => handleMouseDownHandle('top-right', e)}
-              className="absolute -top-1.5 -right-1.5 w-3.5 h-3.5 bg-white border border-black rounded-full cursor-nesw-resize shadow pointer-events-auto"
+              className="absolute -top-1.5 -right-1.5 w-3.5 h-3.5 bg-white border border-black rounded-full cursor-nesw-resize shadow pointer-events-auto hover:scale-125 transition-transform"
+              title="Resize Top-Right"
             />
             <div
               onMouseDown={(e) => handleMouseDownHandle('bottom-left', e)}
-              className="absolute -bottom-1.5 -left-1.5 w-3.5 h-3.5 bg-white border border-black rounded-full cursor-nesw-resize shadow pointer-events-auto"
+              className="absolute -bottom-1.5 -left-1.5 w-3.5 h-3.5 bg-white border border-black rounded-full cursor-nesw-resize shadow pointer-events-auto hover:scale-125 transition-transform"
+              title="Resize Bottom-Left"
             />
             <div
               onMouseDown={(e) => handleMouseDownHandle('bottom-right', e)}
-              className="absolute -bottom-1.5 -right-1.5 w-3.5 h-3.5 bg-white border border-black rounded-full cursor-nwse-resize shadow pointer-events-auto"
+              className="absolute -bottom-1.5 -right-1.5 w-3.5 h-3.5 bg-white border border-black rounded-full cursor-nwse-resize shadow pointer-events-auto hover:scale-125 transition-transform"
+              title="Resize Bottom-Right"
+            />
+
+            {/* Edge Handles */}
+            <div
+              onMouseDown={(e) => handleMouseDownHandle('top', e)}
+              className="absolute -top-1 left-1/2 -translate-x-1/2 w-6 h-2 bg-white/90 border border-black/80 rounded-full cursor-ns-resize shadow pointer-events-auto hover:scale-110 transition-transform"
+              title="Resize Height (Top)"
+            />
+            <div
+              onMouseDown={(e) => handleMouseDownHandle('bottom', e)}
+              className="absolute -bottom-1 left-1/2 -translate-x-1/2 w-6 h-2 bg-white/90 border border-black/80 rounded-full cursor-ns-resize shadow pointer-events-auto hover:scale-110 transition-transform"
+              title="Resize Height (Bottom)"
+            />
+            <div
+              onMouseDown={(e) => handleMouseDownHandle('left', e)}
+              className="absolute -left-1 top-1/2 -translate-y-1/2 w-2 h-6 bg-white/90 border border-black/80 rounded-full cursor-ew-resize shadow pointer-events-auto hover:scale-110 transition-transform"
+              title="Resize Width (Left)"
+            />
+            <div
+              onMouseDown={(e) => handleMouseDownHandle('right', e)}
+              className="absolute -right-1 top-1/2 -translate-y-1/2 w-2 h-6 bg-white/90 border border-black/80 rounded-full cursor-ew-resize shadow pointer-events-auto hover:scale-110 transition-transform"
+              title="Resize Width (Right)"
             />
           </>
         )}
