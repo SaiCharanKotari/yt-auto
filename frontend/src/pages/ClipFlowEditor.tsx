@@ -180,12 +180,22 @@ export default function ClipFlowEditor() {
   const isLiveChannelUrl = isTwitchLiveChannelUrl(activeUrl);
   const isSeekingLiveRef = useRef<boolean>(false);
   const seekFractionalOffsetRef = useRef<number>(0);
+  const liveSeekGenRef = useRef<number>(0);
+  const liveSeekAbortRef = useRef<AbortController | null>(null);
+  const [activeLivePlayer, setActiveLivePlayer] = useState<'A' | 'B'>('A');
+  const videoAElementRef = useRef<HTMLVideoElement | null>(null);
+  const videoBElementRef = useRef<HTMLVideoElement | null>(null);
+
   const {
     chunkUrl: liveChunkUrl,
+    nextChunkUrl: liveNextChunkUrl,
     isLoadingChunk: isLiveChunkLoading,
     chunkError: liveChunkError,
     chunkStartOffset: liveChunkOffset,
+    fetchChunkForSeek,
+    setLiveChunkState,
     loadChunk: loadLiveChunk,
+    advanceToNextChunk: advanceLiveChunk,
     notifyPlaybackProgress: notifyLivePlaybackProgress,
     retryChunk: retryLiveChunk,
   } = useTwitchLiveChannel(isLiveChannelUrl, activeUrl, isProUser, isHelperRunning);
@@ -205,8 +215,10 @@ export default function ClipFlowEditor() {
         if (nextMute) youtubePlayerRef.current.mute();
         else youtubePlayerRef.current.unMute();
       } catch (e) { }
-    } else if (videoElementRef.current) {
-      videoElementRef.current.muted = nextMute;
+    } else {
+      if (videoElementRef.current) videoElementRef.current.muted = nextMute;
+      if (videoAElementRef.current) videoAElementRef.current.muted = nextMute;
+      if (videoBElementRef.current) videoBElementRef.current.muted = nextMute;
     }
   };
 
@@ -642,32 +654,24 @@ export default function ClipFlowEditor() {
     }
   }, [rawPreviewSrc, activeVideoSrc, isHls, isLiveStream, isTwitch, twitchHlsUrl, isTwitter, youtubeId, useProxyFallback, isLiveChannelUrl]);
 
-  // Auto-advance live channel chunks: when playback hits 5s, pre-fetch next 10s chunk
+  // Sync live chunk URLs to double-buffered video elements
   useEffect(() => {
-    if (!isLiveChannelUrl || !videoElementRef.current) return;
-    const video = videoElementRef.current;
-
-    const handleTimeUpdate = () => {
-      // When we've played 7 of the 10 seconds, pre-fetch the next 10s chunk
-      if (video.currentTime >= 7 && !isLiveChunkLoading) {
-        const nextOffset = liveChunkOffset + 10;
-        console.log(`[TwitchLiveChannel] Auto-advancing to next 10s chunk @ t=${nextOffset}s`);
-        loadLiveChunk(nextOffset);
+    if (!isLiveChannelUrl) return;
+    if (isSeekingLiveRef.current) return; // Do not let background prefetch sync interfere during an active seek
+    const activeVideo = activeLivePlayer === 'A' ? videoAElementRef.current : videoBElementRef.current;
+    if (activeVideo && liveChunkUrl && activeVideo.src !== liveChunkUrl) {
+      activeVideo.src = liveChunkUrl;
+      activeVideo.load();
+      if (isPlaying) {
+        activeVideo.play().catch(() => { });
       }
-    };
-
-    video.addEventListener('timeupdate', handleTimeUpdate);
-    return () => video.removeEventListener('timeupdate', handleTimeUpdate);
-  }, [isLiveChannelUrl, isLiveChunkLoading, liveChunkOffset, loadLiveChunk]);
-
-  // Update video src when a new live chunk blob URL arrives
-  useEffect(() => {
-    if (!isLiveChannelUrl || !liveChunkUrl || !videoElementRef.current) return;
-    const video = videoElementRef.current;
-    video.src = liveChunkUrl;
-    video.load();
-    video.play().catch(() => { });
-  }, [isLiveChannelUrl, liveChunkUrl]);
+    }
+    const standbyVideo = activeLivePlayer === 'A' ? videoBElementRef.current : videoAElementRef.current;
+    if (standbyVideo && liveNextChunkUrl && standbyVideo.src !== liveNextChunkUrl) {
+      standbyVideo.src = liveNextChunkUrl;
+      standbyVideo.load();
+    }
+  }, [isLiveChannelUrl, liveChunkUrl, liveNextChunkUrl, activeLivePlayer, isPlaying]);
 
 
   // Socket.io ref for cloud download real-time progress
@@ -1213,20 +1217,97 @@ export default function ClipFlowEditor() {
       isSeekingRef.current = false;
       pendingSeekTimeRef.current = null;
     } else if (isLiveChannelUrl) {
-      const chunkBase = Math.floor(targetTime / 5) * 5;
-      const fraction = targetTime - chunkBase;
-      
-      isSeekingLiveRef.current = true;
-      seekFractionalOffsetRef.current = fraction;
+      const chunkOffset = Math.floor(targetTime / 5) * 5;
+      const localTime = targetTime - chunkOffset;
+      const wasPlaying = isPlaying;
 
-      console.log('[Twitch Timeline ⏱️]', {
-        action: 'manualSeek',
-        requestedGlobalTime: targetTime,
-        chunkStartOffset: chunkBase,
-        fractionalOffset: fraction,
+      isSeekingLiveRef.current = true;
+      seekFractionalOffsetRef.current = localTime;
+
+      const currentGen = ++liveSeekGenRef.current;
+
+      if (liveSeekAbortRef.current) {
+        liveSeekAbortRef.current.abort();
+      }
+      const abortCtrl = new AbortController();
+      liveSeekAbortRef.current = abortCtrl;
+
+      console.log('[Twitch LIVE 🎯 SEEK]', {
+        gen: currentGen,
+        targetTime,
+        chunkOffset,
+        localTime,
+        wasPlaying,
+        activeLivePlayer,
       });
 
-      loadLiveChunk(chunkBase, true);
+      // Target player for the seek is the STANDBY (inactive) player so visible player stays unbroken
+      const targetPlayerTag = activeLivePlayer === 'A' ? 'B' : 'A';
+      const targetVideo = targetPlayerTag === 'A' ? videoAElementRef.current : videoBElementRef.current;
+      const currentVideo = activeLivePlayer === 'A' ? videoAElementRef.current : videoBElementRef.current;
+
+      (async () => {
+        try {
+          const url = await fetchChunkForSeek(chunkOffset, abortCtrl.signal);
+          if (liveSeekGenRef.current !== currentGen) {
+            console.log(`[Twitch LIVE ⏭️ STALE SEEK DROPPED] Gen ${currentGen} < ${liveSeekGenRef.current}`);
+            return;
+          }
+
+          if (!targetVideo) return;
+
+          targetVideo.src = url;
+          targetVideo.preload = 'auto';
+          targetVideo.load();
+
+          const performSwap = () => {
+            if (liveSeekGenRef.current !== currentGen) return;
+
+            try {
+              targetVideo.currentTime = localTime;
+            } catch (e) {}
+
+            if (wasPlaying) {
+              targetVideo.play().catch(() => {});
+            } else {
+              targetVideo.pause();
+            }
+
+            // Switch visible player instantly
+            setActiveLivePlayer(targetPlayerTag);
+            setLiveChunkState(chunkOffset, url);
+
+            if (currentVideo && currentVideo !== targetVideo) {
+              try { currentVideo.pause(); } catch (e) {}
+            }
+
+            isSeekingLiveRef.current = false;
+            pendingSeekTimeRef.current = null;
+            isSeekingRef.current = false;
+
+            console.log(`[Twitch LIVE ✅ SEEK COMPLETED] Gen ${currentGen} -> Player ${targetPlayerTag} @ ${targetTime}s`);
+          };
+
+          if (targetVideo.readyState >= 2) {
+            performSwap();
+          } else {
+            const onReady = () => {
+              targetVideo.removeEventListener('loadeddata', onReady);
+              targetVideo.removeEventListener('canplay', onReady);
+              performSwap();
+            };
+            targetVideo.addEventListener('loadeddata', onReady, { once: true });
+            targetVideo.addEventListener('canplay', onReady, { once: true });
+          }
+        } catch (err: any) {
+          if (err.name === 'AbortError') return;
+          console.warn('[Twitch LIVE ❌ SEEK ERROR]', err.message);
+          if (liveSeekGenRef.current === currentGen) {
+            isSeekingLiveRef.current = false;
+            isSeekingRef.current = false;
+          }
+        }
+      })();
     } else if (videoElementRef.current) {
       if (isTwitchLiveChannel) {
         refreshLiveSegment();
@@ -1251,14 +1332,65 @@ export default function ClipFlowEditor() {
         try { youtubePlayerRef.current.playVideo(); } catch (e) { }
         setIsPlaying(true);
       }
-    } else if (videoElementRef.current) {
-      if (isPlaying) {
-        videoElementRef.current.pause();
-        setIsPlaying(false);
-      } else {
-        videoElementRef.current.play().catch(() => { });
-        setIsPlaying(true);
+    } else {
+      const activeVideo = isLiveChannelUrl
+        ? (activeLivePlayer === 'A' ? videoAElementRef.current : videoBElementRef.current)
+        : videoElementRef.current;
+      if (activeVideo) {
+        if (isPlaying) {
+          activeVideo.pause();
+          setIsPlaying(false);
+        } else {
+          activeVideo.play().catch(() => { });
+          setIsPlaying(true);
+        }
       }
+    }
+  };
+
+  // Seamless live chunk transition handlers for zero-glitch double buffering
+  const handleLiveTimeUpdate = (e: React.SyntheticEvent<HTMLVideoElement>, playerTag: 'A' | 'B') => {
+    const v = e.currentTarget;
+    if (playerTag !== activeLivePlayer) return;
+
+    if (isSeekingLiveRef.current) return;
+
+    const currentTimelineTime = liveChunkOffset + v.currentTime;
+    setCurrentTime(currentTimelineTime);
+    notifyLivePlaybackProgress(v.currentTime);
+
+    const actualDur = (v.duration && Number.isFinite(v.duration) && v.duration > 0) ? v.duration : 5;
+    // When within 100ms of end and next preloaded chunk is ready -> seamless instant swap!
+    if (v.currentTime >= actualDur - 0.1 && liveNextChunkUrl) {
+      const nextPlayer = playerTag === 'A' ? 'B' : 'A';
+      const nextVideoEl = nextPlayer === 'A' ? videoAElementRef.current : videoBElementRef.current;
+      if (nextVideoEl && nextVideoEl.readyState >= 2) {
+        console.log(`[TwitchLive ⚡ ZERO-GAP SWAP] ${playerTag} -> ${nextPlayer} @ t=${currentTimelineTime.toFixed(2)}s`);
+        if (isPlaying) {
+          nextVideoEl.currentTime = 0;
+          nextVideoEl.play().catch(() => { });
+        }
+        setActiveLivePlayer(nextPlayer);
+        advanceLiveChunk();
+      }
+    }
+  };
+
+  const handleLiveEnded = (playerTag: 'A' | 'B') => {
+    if (playerTag !== activeLivePlayer) return;
+    console.log(`[TwitchLive ⏹️ CHUNK ENDED] Player ${playerTag}`);
+    const nextPlayer = playerTag === 'A' ? 'B' : 'A';
+    const nextVideoEl = nextPlayer === 'A' ? videoAElementRef.current : videoBElementRef.current;
+    if (nextVideoEl && nextVideoEl.readyState >= 2) {
+      if (isPlaying) {
+        nextVideoEl.currentTime = 0;
+        nextVideoEl.play().catch(() => { });
+      }
+      setActiveLivePlayer(nextPlayer);
+      advanceLiveChunk();
+    } else {
+      const nextOffset = liveChunkOffset + 5;
+      loadLiveChunk(nextOffset, false);
     }
   };
 
@@ -1887,6 +2019,122 @@ export default function ClipFlowEditor() {
                               }}
                             />
                           </div>
+                        ) : isLiveChannelUrl ? (
+                          <div className="w-full h-full relative flex items-center justify-center overflow-hidden bg-black">
+                            {/* Video Player A (Primary / Buffer 1) */}
+                            <video
+                              ref={videoAElementRef}
+                              preload="auto"
+                              playsInline
+                              muted={isMuted}
+                              onSeeking={() => {
+                                if (activeLivePlayer === 'A') {
+                                  isSeekingRef.current = true;
+                                  setIsVideoBuffering(true);
+                                }
+                              }}
+                              onSeeked={() => {
+                                if (activeLivePlayer === 'A') {
+                                  setIsVideoBuffering(false);
+                                  isSeekingLiveRef.current = false;
+                                }
+                              }}
+                              onCanPlay={() => {
+                                setIsVideoBuffering(false);
+                                if (activeLivePlayer === 'A') {
+                                  if (seekFractionalOffsetRef.current > 0) {
+                                    try {
+                                      if (videoAElementRef.current) {
+                                        videoAElementRef.current.currentTime = seekFractionalOffsetRef.current;
+                                      }
+                                    } catch { }
+                                    seekFractionalOffsetRef.current = 0;
+                                  }
+                                  if (isPlaying && videoAElementRef.current?.paused) {
+                                    videoAElementRef.current.play().catch(() => { });
+                                  }
+                                }
+                              }}
+                              onLoadedMetadata={(e) => {
+                                const v = e.currentTarget;
+                                v.volume = volume;
+                                v.muted = isMuted;
+                                if (activeLivePlayer === 'A') {
+                                  setIsVideoBuffering(false);
+                                  if (seekFractionalOffsetRef.current > 0) {
+                                    try { v.currentTime = seekFractionalOffsetRef.current; } catch { }
+                                    seekFractionalOffsetRef.current = 0;
+                                  }
+                                  isSeekingLiveRef.current = false;
+                                  if (isPlaying && v.paused) {
+                                    v.play().catch(() => { });
+                                  }
+                                }
+                              }}
+                              onTimeUpdate={(e) => handleLiveTimeUpdate(e, 'A')}
+                              onEnded={() => handleLiveEnded('A')}
+                              className={`w-full h-full object-contain pointer-events-none absolute inset-0 ${
+                                activeLivePlayer === 'A' ? 'opacity-100 z-10' : 'opacity-0 z-0'
+                              }`}
+                            />
+
+                            {/* Video Player B (Secondary / Buffer 2) */}
+                            <video
+                              ref={videoBElementRef}
+                              preload="auto"
+                              playsInline
+                              muted={isMuted}
+                              onSeeking={() => {
+                                if (activeLivePlayer === 'B') {
+                                  isSeekingRef.current = true;
+                                  setIsVideoBuffering(true);
+                                }
+                              }}
+                              onSeeked={() => {
+                                if (activeLivePlayer === 'B') {
+                                  setIsVideoBuffering(false);
+                                  isSeekingLiveRef.current = false;
+                                }
+                              }}
+                              onCanPlay={() => {
+                                setIsVideoBuffering(false);
+                                if (activeLivePlayer === 'B') {
+                                  if (seekFractionalOffsetRef.current > 0) {
+                                    try {
+                                      if (videoBElementRef.current) {
+                                        videoBElementRef.current.currentTime = seekFractionalOffsetRef.current;
+                                      }
+                                    } catch { }
+                                    seekFractionalOffsetRef.current = 0;
+                                  }
+                                  if (isPlaying && videoBElementRef.current?.paused) {
+                                    videoBElementRef.current.play().catch(() => { });
+                                  }
+                                }
+                              }}
+                              onLoadedMetadata={(e) => {
+                                const v = e.currentTarget;
+                                v.volume = volume;
+                                v.muted = isMuted;
+                                if (activeLivePlayer === 'B') {
+                                  setIsVideoBuffering(false);
+                                  if (seekFractionalOffsetRef.current > 0) {
+                                    try { v.currentTime = seekFractionalOffsetRef.current; } catch { }
+                                    seekFractionalOffsetRef.current = 0;
+                                  }
+                                  isSeekingLiveRef.current = false;
+                                  if (isPlaying && v.paused) {
+                                    v.play().catch(() => { });
+                                  }
+                                }
+                              }}
+                              onTimeUpdate={(e) => handleLiveTimeUpdate(e, 'B')}
+                              onEnded={() => handleLiveEnded('B')}
+                              className={`w-full h-full object-contain pointer-events-none absolute inset-0 ${
+                                activeLivePlayer === 'B' ? 'opacity-100 z-10' : 'opacity-0 z-0'
+                              }`}
+                            />
+                          </div>
                         ) : (
                           <video
                             ref={videoElementRef}
@@ -2050,33 +2298,12 @@ export default function ClipFlowEditor() {
                                 setUseProxyFallback(true);
                               }
                             }}
-                            onEnded={(e) => {
+                            onEnded={() => {
                               console.log('%c[ClipFlow ⏹️ VIDEO ENDED]', 'color: #6b7280;');
-                              if (isLiveChannelUrl) {
-                                const v = e.currentTarget;
-                                const actualDur = (v.duration && Number.isFinite(v.duration) && v.duration > 0) ? v.duration : 5;
-                                const nextOffset = liveChunkOffset + Math.round(actualDur);
-
-                                console.log('[Twitch Timeline ⏱️]', {
-                                  action: 'chunk swap onEnded',
-                                  finishedChunkOffset: liveChunkOffset,
-                                  videoDuration: actualDur,
-                                  nextChunkOffset: nextOffset,
-                                  effectiveDuration,
-                                });
-
-                                if (effectiveDuration > 0 && nextOffset < effectiveDuration) {
-                                  loadLiveChunk(nextOffset, false);
-                                } else {
-                                  setIsPlaying(false);
-                                  setIsVideoBuffering(false);
-                                }
-                              } else {
-                                setIsPlaying(false);
-                                setIsVideoBuffering(false);
-                                if (videoElementRef.current) {
-                                  videoElementRef.current.currentTime = isTrimEnabled ? trimRange[0] : 0;
-                                }
+                              setIsPlaying(false);
+                              setIsVideoBuffering(false);
+                              if (videoElementRef.current) {
+                                videoElementRef.current.currentTime = isTrimEnabled ? trimRange[0] : 0;
                               }
                             }}
                             className="w-full h-full object-contain pointer-events-none"
@@ -2084,7 +2311,7 @@ export default function ClipFlowEditor() {
                         )}
 
                         {/* Video Buffering Overlay */}
-                        {(isVideoBuffering || (isLiveChannelUrl && isLiveChunkLoading)) && (
+                        {(isVideoBuffering || (isLiveChannelUrl && isLiveChunkLoading && !liveChunkUrl)) && (
                           <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/40 backdrop-blur-[1px] pointer-events-none">
                             <Loader2 className="w-8 h-8 text-white animate-spin" />
                           </div>

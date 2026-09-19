@@ -32,16 +32,24 @@ export function isTwitchLiveChannelUrl(url: string | null | undefined): boolean 
 }
 
 export interface TwitchLiveChannelState {
-  /** The blob/object URL of the current MP4 chunk, ready to assign to <video src> */
+  /** The blob/object URL of the current MP4 chunk, ready to assign to active <video src> */
   chunkUrl: string;
-  /** Whether a chunk is currently being fetched from server/daemon */
+  /** The blob/object URL of the next MP4 chunk, ready to preload in standby <video src> */
+  nextChunkUrl: string;
+  /** Whether the active chunk is currently being fetched from server/daemon */
   isLoadingChunk: boolean;
   /** Error message if the last chunk fetch failed */
   chunkError: string;
   /** The global time offset (seconds) this chunk starts at */
   chunkStartOffset: number;
-  /** Call this to request the next chunk starting at a given offset */
+  /** Fetch a specific chunk on-demand for manual seek with caching and abort signal support */
+  fetchChunkForSeek: (targetOffset: number, signal?: AbortSignal) => Promise<string>;
+  /** Update active chunk offset and url after seek completes */
+  setLiveChunkState: (offset: number, url: string) => void;
+  /** Call this to request the next chunk starting at a given offset (e.g. on manual seek) */
   loadChunk: (startOffset: number, isManualSeek?: boolean) => void;
+  /** Seamlessly advance state to the next chunk */
+  advanceToNextChunk: () => void;
   /** Notify the hook of current playback seconds within chunk to trigger look-ahead prefetch */
   notifyPlaybackProgress: (localSeconds: number) => void;
   /** Reload the current chunk (e.g. on user retry) */
@@ -55,6 +63,7 @@ export function useTwitchLiveChannel(
   isDaemonRunning: boolean
 ): TwitchLiveChannelState {
   const [chunkUrl, setChunkUrl] = useState('');
+  const [nextChunkUrl, setNextChunkUrl] = useState('');
   const [isLoadingChunk, setIsLoadingChunk] = useState(false);
   const [chunkError, setChunkError] = useState('');
   const [chunkStartOffset, setChunkStartOffset] = useState(0);
@@ -129,8 +138,8 @@ export function useTwitchLiveChannel(
       const objectUrl = URL.createObjectURL(blob);
       chunkCacheRef.current.set(targetOffset, objectUrl);
 
-      // Limit cache size to 8 chunks (40 seconds of video), evicting oldest non-active
-      if (chunkCacheRef.current.size > 8) {
+      // Limit cache size to 12 chunks (60 seconds of video), evicting oldest non-active
+      if (chunkCacheRef.current.size > 12) {
         const oldestKey = Array.from(chunkCacheRef.current.keys())[0];
         if (oldestKey !== currentOffsetRef.current && oldestKey !== targetOffset) {
           const oldUrl = chunkCacheRef.current.get(oldestKey);
@@ -154,16 +163,26 @@ export function useTwitchLiveChannel(
     }
   }, [channelUrl, isDaemonRunning]);
 
-  // Background Prefetching: immediately fetch next 1-2 chunks ahead
+  // Background Prefetching: immediately fetch next 1-2 chunks ahead and populate nextChunkUrl
   const prefetchUpcomingChunks = useCallback((fromOffset: number) => {
     if (!isActive || !channelUrl) return;
 
     const next1 = fromOffset + CHUNK_DURATION;
     const next2 = fromOffset + CHUNK_DURATION * 2;
 
-    if (!chunkCacheRef.current.has(next1) && !inFlightRequestsRef.current.has(next1)) {
-      console.log(`[TwitchLive ⚡ PREFETCH] Queuing next chunk at t=${next1}s`);
-      fetchSingleChunk(next1).catch(() => {});
+    const cachedNext1 = chunkCacheRef.current.get(next1);
+    if (cachedNext1) {
+      if (currentOffsetRef.current === fromOffset) {
+        setNextChunkUrl(cachedNext1);
+      }
+    } else {
+      fetchSingleChunk(next1)
+        .then((url) => {
+          if (currentOffsetRef.current === fromOffset) {
+            setNextChunkUrl(url);
+          }
+        })
+        .catch(() => {});
     }
 
     if (!chunkCacheRef.current.has(next2) && !inFlightRequestsRef.current.has(next2)) {
@@ -184,11 +203,12 @@ export function useTwitchLiveChannel(
 
     isTransitioningRef.current = true;
     currentOffsetRef.current = startOffset;
+    setNextChunkUrl('');
 
-    // 1. If chunk is already ready in prefetch cache -> Instant 0ms switch!
+    // 1. If chunk is already ready in prefetch cache -> Instant switch!
     const cachedUrl = chunkCacheRef.current.get(startOffset);
     if (cachedUrl) {
-      console.log(`[TwitchLive ⚡ ZERO-LATENCY SWAP] Instant transition to t=${startOffset}s!`);
+      console.log(`[TwitchLive ⚡ INSTANT SWAP] Transition to t=${startOffset}s`);
       setChunkUrl(cachedUrl);
       setChunkStartOffset(startOffset);
       setIsLoadingChunk(false);
@@ -233,8 +253,38 @@ export function useTwitchLiveChannel(
     }
   }, [isActive, channelUrl, fetchSingleChunk, prefetchUpcomingChunks]);
 
+  const fetchChunkForSeek = useCallback(async (targetOffset: number, signal?: AbortSignal): Promise<string> => {
+    const cached = chunkCacheRef.current.get(targetOffset);
+    if (cached) return cached;
+    return await fetchSingleChunk(targetOffset, signal);
+  }, [fetchSingleChunk]);
+
+  const setLiveChunkState = useCallback((offset: number, url: string) => {
+    currentOffsetRef.current = offset;
+    setChunkStartOffset(offset);
+    setChunkUrl(url);
+    setNextChunkUrl('');
+    prefetchUpcomingChunks(offset);
+  }, [prefetchUpcomingChunks]);
+
+  const advanceToNextChunk = useCallback(() => {
+    const nextOffset = currentOffsetRef.current + CHUNK_DURATION;
+    currentOffsetRef.current = nextOffset;
+    setChunkStartOffset(nextOffset);
+
+    const cachedNext = chunkCacheRef.current.get(nextOffset);
+    if (cachedNext) {
+      setChunkUrl(cachedNext);
+    } else if (nextChunkUrl) {
+      setChunkUrl(nextChunkUrl);
+    }
+
+    setNextChunkUrl('');
+    prefetchUpcomingChunks(nextOffset);
+  }, [nextChunkUrl, prefetchUpcomingChunks]);
+
   const notifyPlaybackProgress = useCallback((localSeconds: number) => {
-    if (localSeconds >= 1.5) {
+    if (localSeconds >= 0.5) {
       prefetchUpcomingChunks(currentOffsetRef.current);
     }
   }, [prefetchUpcomingChunks]);
@@ -244,6 +294,7 @@ export function useTwitchLiveChannel(
     if (!isActive || !channelUrl) {
       clearCache();
       setChunkUrl('');
+      setNextChunkUrl('');
       setChunkStartOffset(0);
       setChunkError('');
       return;
@@ -260,10 +311,14 @@ export function useTwitchLiveChannel(
 
   return {
     chunkUrl,
+    nextChunkUrl,
     isLoadingChunk,
     chunkError,
     chunkStartOffset,
+    fetchChunkForSeek,
+    setLiveChunkState,
     loadChunk,
+    advanceToNextChunk,
     notifyPlaybackProgress,
     retryChunk: () => loadChunk(chunkStartOffset, true),
   };
