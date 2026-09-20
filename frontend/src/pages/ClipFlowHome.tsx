@@ -193,7 +193,7 @@ export default function ClipFlowHome() {
               className="space-y-4"
             >
               {/* Badge with NO leading logo */}
-              <div className="inline-flex items-center px-4 py-1.5 rounded-full border border-purple-500/30 bg-purple-500/10 text-purple-300 text-xs font-semibold mb-2 shadow-sm shadow-purple-500/10">
+              <div className="inline-flex items-center px-4 py-1.5 rounded-full border border-white bg-white text-black text-xs font-bold mb-2 shadow-md">
                 <span>Next-Gen Video Clipping & Framing Studio</span>
               </div>
               <h1 className="text-4xl sm:text-5xl lg:text-6xl font-extrabold tracking-tight text-white leading-tight">

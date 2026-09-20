@@ -50,7 +50,7 @@ export function getFFmpegAspectFilter(
   }
 
   // Priority 1: Interactive Crop Box Coordinates (Drag-to-Frame / Custom)
-  if (cropBox && cropBox.width > 0 && cropBox.height > 0) {
+  if (fitMode !== 'pad' && cropBox && cropBox.width > 0 && cropBox.height > 0) {
     const w = Math.min(1, Math.max(0.05, cropBox.width)).toFixed(4);
     const h = Math.min(1, Math.max(0.05, cropBox.height)).toFixed(4);
     const x = Math.min(1, Math.max(0, cropBox.x)).toFixed(4);

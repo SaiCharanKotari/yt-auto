@@ -223,6 +223,17 @@ class DaemonHTTPHandler(BaseHTTPRequestHandler):
             resp_body = {"status": "ok", "app": "ClipFlowHelper", "version": "1.0.0", "daemon": True}
             self._send_json(200, resp_body, origin)
         elif parsed.path == "/twitch/live-segment":
+            # Live chunks are streamed in background: ensure helper UI stays hidden
+            try:
+                hide_req = urllib.request.Request(
+                    "http://127.0.0.1:18943/hide",
+                    data=b"{}",
+                    headers={"Content-Type": "application/json"}
+                )
+                urllib.request.urlopen(hide_req, timeout=0.15)
+            except Exception:
+                pass
+
             import urllib.parse
             query_params = urllib.parse.parse_qs(parsed.query)
             target_url = query_params.get("url", [""])[0].strip()

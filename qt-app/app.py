@@ -53,7 +53,7 @@ if sys.platform == "win32":
 
 try:
     from PyQt6.QtWidgets import QApplication, QWidget, QMenu
-    from PyQt6.QtCore import Qt, QPoint, QPointF, QRectF, QTimer, pyqtSignal, QObject
+    from PyQt6.QtCore import Qt, QPoint, QPointF, QRectF, QTimer, pyqtSignal, QObject, QPropertyAnimation, QEasingCurve
     from PyQt6.QtGui import (
         QPainter, QPainterPath, QColor, QLinearGradient, QConicalGradient,
         QPen, QBrush, QFont, QPixmap, QIcon, QDesktopServices, QGuiApplication
@@ -62,7 +62,7 @@ try:
 except ImportError:
     try:
         from PySide6.QtWidgets import QApplication, QWidget, QMenu
-        from PySide6.QtCore import Qt, QPoint, QPointF, QRectF, QTimer, Signal as pyqtSignal, QObject
+        from PySide6.QtCore import Qt, QPoint, QPointF, QRectF, QTimer, Signal as pyqtSignal, QObject, QPropertyAnimation, QEasingCurve
         from PySide6.QtGui import (
             QPainter, QPainterPath, QColor, QLinearGradient, QConicalGradient,
             QPen, QBrush, QFont, QPixmap, QIcon, QDesktopServices, QGuiApplication
@@ -280,7 +280,7 @@ def format_seconds(seconds: float) -> str:
 def get_aspect_filter(ratio: str, mode: str = "pad", crop_pos: str = "center", crop_box: dict = None) -> str:
     if not ratio or ratio in ["16:9", "original"]:
         return ""
-    if crop_box and isinstance(crop_box, dict) and float(crop_box.get("width", 0)) > 0 and float(crop_box.get("height", 0)) > 0:
+    if mode != "pad" and crop_box and isinstance(crop_box, dict) and float(crop_box.get("width", 0)) > 0 and float(crop_box.get("height", 0)) > 0:
         w = f"{max(0.05, min(1.0, float(crop_box['width']))):.4f}"
         h = f"{max(0.05, min(1.0, float(crop_box['height']))):.4f}"
         x = f"{max(0.0, min(1.0, float(crop_box.get('x', 0)))):.4f}"
@@ -353,6 +353,8 @@ class ServerBridge(QObject):
     processing_updated = pyqtSignal(str)
     completed = pyqtSignal()
     error_occurred = pyqtSignal(str)
+    show_ui_requested = pyqtSignal()
+    hide_ui_requested = pyqtSignal()
 
 
 server_bridge = ServerBridge()
@@ -424,6 +426,8 @@ class LocalHTTPRequestHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/twitch/live-segment":
+            # Live chunks are streamed in background; ensure UI is hidden
+            server_bridge.hide_ui_requested.emit()
             import urllib.parse
             query_params = urllib.parse.parse_qs(parsed.query)
             target_url = query_params.get("url", [""])[0].strip()
@@ -589,8 +593,26 @@ class ResilientHTTPServer(ThreadingHTTPServer):
 
 class IPCHandler(BaseHTTPRequestHandler):
     def do_POST(self):
+        parsed = urlparse(self.path)
         content_length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(content_length).decode("utf-8") if content_length > 0 else "{}"
+
+        if parsed.path == "/hide":
+            server_bridge.hide_ui_requested.emit()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"status":"ok","action":"hidden"}')
+            return
+
+        if parsed.path == "/show":
+            server_bridge.show_ui_requested.emit()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"status":"ok","action":"shown"}')
+            return
+
         try:
             payload = json.loads(body)
             server_bridge.download_requested.emit(payload)
@@ -601,6 +623,25 @@ class IPCHandler(BaseHTTPRequestHandler):
         except Exception as e:
             self.send_response(500)
             self.end_headers()
+
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        if parsed.path == "/hide":
+            server_bridge.hide_ui_requested.emit()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"status":"ok","action":"hidden"}')
+            return
+        elif parsed.path == "/show":
+            server_bridge.show_ui_requested.emit()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"status":"ok","action":"shown"}')
+            return
+        self.send_response(404)
+        self.end_headers()
 
     def log_message(self, format, *args):
         pass
@@ -769,6 +810,13 @@ class FloatingWidget(QWidget):
         if LOGO_PATH.exists():
             self.logo.load(str(LOGO_PATH))
 
+        self._delay_timer = QTimer(self)
+        self._delay_timer.setSingleShot(True)
+        self._delay_timer.timeout.connect(self._start_fade_out)
+
+        self._fade_anim = QPropertyAnimation(self, b"windowOpacity")
+        self._fade_anim.finished.connect(self._on_fade_out_finished)
+
         self.revert_timer = QTimer(self)
         self.revert_timer.setSingleShot(True)
         self.revert_timer.timeout.connect(self.reset_to_idle)
@@ -779,6 +827,8 @@ class FloatingWidget(QWidget):
         server_bridge.processing_updated.connect(self.set_processing)
         server_bridge.completed.connect(self.set_complete)
         server_bridge.error_occurred.connect(self.set_error)
+        server_bridge.show_ui_requested.connect(self.display_ui)
+        server_bridge.hide_ui_requested.connect(lambda: self.hide_ui(delay_ms=0))
 
     def setup_ui(self):
         # Compact, sleek 76x76 1:1 floating badge
@@ -791,6 +841,53 @@ class FloatingWidget(QWidget):
         if screen:
             geom = screen.availableGeometry()
             self.move(geom.right() - self.width() - 16, geom.bottom() - self.height() - 36)
+
+    def display_ui(self):
+        """Show the UI widget, canceling any pending fade-out."""
+        if hasattr(self, "_delay_timer") and self._delay_timer.isActive():
+            self._delay_timer.stop()
+        if hasattr(self, "_fade_anim") and self._fade_anim.state() == QPropertyAnimation.State.Running:
+            self._fade_anim.stop()
+        self.setWindowOpacity(1.0)
+        if not self.isVisible():
+            self.show()
+        self.raise_()
+        self.activateWindow()
+        self.update()
+
+    def hide_ui(self, delay_ms: int = 0):
+        """Hides the UI widget after an optional delay with a smooth fade-out."""
+        if not self.isVisible() and self.windowOpacity() <= 0.01:
+            return
+        if hasattr(self, "_delay_timer") and self._delay_timer.isActive():
+            self._delay_timer.stop()
+        if hasattr(self, "_fade_anim") and self._fade_anim.state() == QPropertyAnimation.State.Running:
+            self._fade_anim.stop()
+
+        if delay_ms > 0:
+            self._delay_timer.start(delay_ms)
+        else:
+            self._start_fade_out()
+
+    def _start_fade_out(self):
+        """Smoothly fades out opacity before hiding the widget."""
+        if not self.isVisible():
+            return
+        if hasattr(self, "_fade_anim") and self._fade_anim.state() == QPropertyAnimation.State.Running:
+            self._fade_anim.stop()
+
+        self._fade_anim.setDuration(400)
+        self._fade_anim.setStartValue(self.windowOpacity())
+        self._fade_anim.setEndValue(0.0)
+        self._fade_anim.setEasingCurve(QEasingCurve.Type.InOutQuad)
+        self._fade_anim.start()
+
+    def _on_fade_out_finished(self):
+        self.hide()
+        self.setWindowOpacity(1.0)
+        self.reset_to_idle()
+        if self.auto_close:
+            QApplication.quit()
 
     def reset_to_idle(self):
         self.state = "idle"
@@ -822,28 +919,20 @@ class FloatingWidget(QWidget):
         self.status_text = "Done!"
         self.speed_text = "Saved"
         self.update()
-        if self.auto_close:
-            # When spawned by daemon, close app 2 seconds after downloading/completing video
-            QTimer.singleShot(2000, QApplication.quit)
-        else:
-            self.revert_timer.start(3000)
+        # Wait 1 sec, then smoothly fade out
+        self.hide_ui(delay_ms=1000)
 
     def set_error(self, err: str = "Failed"):
         self.state = "error"
         self.status_text = "Error"
         self.speed_text = err[:10]
         self.update()
-        if self.auto_close:
-            QTimer.singleShot(3500, QApplication.quit)
-        else:
-            self.revert_timer.start(3500)
+        # Give user time to see error status, then fade out
+        self.hide_ui(delay_ms=2000)
 
     def start_download_job(self, options: dict):
-        # ── Wake Up Engine Widget if Hidden ──────────────────────────────────
-        if not self.isVisible():
-            self.show()
-        self.raise_()
-        self.activateWindow()
+        # ── Wake Up & Display Engine Widget for download ─────────────────────
+        self.display_ui()
         threading.Thread(target=self._run_download_pipeline, args=(options,), daemon=True).start()
 
     def _run_download_pipeline(self, options: dict):
@@ -1381,8 +1470,7 @@ def main():
 
     auto_close = ("--auto-close" in sys.argv)
     widget = FloatingWidget(auto_close=auto_close)
-    widget.show()
-    widget.raise_()
+    # Starts hidden: only displayed when downloading a video for free users
 
     # Process any queued job immediately
     QTimer.singleShot(100, check_and_process_pending_jobs)

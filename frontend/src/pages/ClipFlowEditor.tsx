@@ -8,6 +8,7 @@ import {
   RotateCcw, RotateCw,
   RectangleHorizontal, Smartphone, Square,
   RectangleVertical, Crop,
+  Minimize2,
   Play, Pause,
   Volume2, VolumeX,
   Cloud, HardDrive, Check, X,
@@ -200,6 +201,8 @@ export default function ClipFlowEditor() {
   const videoCanvasRef = useRef<HTMLDivElement>(null);
   const isSeekingRef = useRef<boolean>(false);
   const pendingSeekTimeRef = useRef<number | null>(null);
+  const lastSeekTimeRef = useRef<number>(0);
+  const seekOriginTimeRef = useRef<number | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isVideoBuffering, setIsVideoBuffering] = useState(false);
   const [currentTime, setCurrentTime] = useState(initialSession?.currentTime || 0);
@@ -350,8 +353,6 @@ export default function ClipFlowEditor() {
     width: initialSession?.metadata?.width || 1920,
     height: initialSession?.metadata?.height || 1080,
   });
-  const outputCanvasRef = useRef<HTMLCanvasElement | null>(null);
-
   // Sync videoDimensions if metadata arrives with width/height
   useEffect(() => {
     if (metadata?.width && metadata?.height && metadata.width > 0 && metadata.height > 0) {
@@ -371,7 +372,17 @@ export default function ClipFlowEditor() {
   }, [videoDimensions.width, videoDimensions.height, metadata]);
 
   const [fitMode, setFitMode] = useState<'crop' | 'pad'>(initialSession?.fitMode || 'crop');
-  void setFitMode;
+  const isPadMode = aspectRatio !== '16:9' && aspectRatio !== 'custom' && fitMode === 'pad';
+
+  const currentContainerAspect = useMemo(() => {
+    if (isPadMode) {
+      if (aspectRatio === '9:16') return 9 / 16;
+      if (aspectRatio === '1:1') return 1;
+      if (aspectRatio === '4:5') return 4 / 5;
+    }
+    return sourceAspectRatio;
+  }, [isPadMode, aspectRatio, sourceAspectRatio]);
+
   const [cropPosition, setCropPosition] = useState<'center' | 'left' | 'right'>(initialSession?.cropPosition || 'center');
 
   const [downloadFormat, setDownloadFormat] = useState<'mp4' | 'mp3' | 'captions'>(initialSession?.downloadFormat || 'mp4');
@@ -438,7 +449,7 @@ export default function ClipFlowEditor() {
     const ro = new ResizeObserver(updateDims);
     ro.observe(el);
     return () => ro.disconnect();
-  }, [metadata, videoHeight, sourceAspectRatio]);
+  }, [metadata, videoHeight, sourceAspectRatio, currentContainerAspect]);
 
   // Compute clean, standard preview qualities and default stream (Priority: 1080p -> 720p -> highest available)
   const { previewQualities, defaultPreviewStreamUrl } = useMemo(() => {
@@ -1359,9 +1370,37 @@ export default function ClipFlowEditor() {
         try {
           if (youtubePlayerRef.current) {
             const time = await youtubePlayerRef.current.getCurrentTime();
-            setCurrentTime(time);
+
+            if (isSeekingRef.current) {
+              const target = pendingSeekTimeRef.current;
+              const elapsed = Date.now() - (lastSeekTimeRef.current || 0);
+
+              // Check if YouTube has actually caught up to the seek target:
+              // 1. YouTube time is within 1.2s of target, OR
+              // 2. YouTube time is at or just past target (forward seek), OR
+              // 3. Target was very close to origin (<= 1.5s) and at least 250ms have elapsed, OR
+              // 4. Safety timeout: elapsed > 1500ms
+              const origin = seekOriginTimeRef.current ?? target;
+              const isSmallSeek = origin !== null && target !== null && Math.abs(target - origin) <= 1.5;
+              const isCloseToTarget = target !== null && (Math.abs(time - target) < 1.2 || (time >= target && time <= target + 2.5));
+              const isSmallSeekSettled = isSmallSeek && elapsed > 250;
+              const isTimedOut = elapsed > 1500;
+
+              if (isCloseToTarget || isSmallSeekSettled || isTimedOut) {
+                isSeekingRef.current = false;
+                pendingSeekTimeRef.current = null;
+                seekOriginTimeRef.current = null;
+                setCurrentTime(time);
+              } else {
+                // Ignore stale time frames while YouTube buffers to seek target
+                return;
+              }
+            } else {
+              setCurrentTime(time);
+            }
+
             const isExplicitSubClip = isTrimEnabled && (trimRange[0] > 1 || (trimRange[1] > 0 && trimRange[1] < effectiveDuration - 2));
-            if (isExplicitSubClip && time >= trimRange[1]) {
+            if (isExplicitSubClip && !isSeekingRef.current && time >= trimRange[1] && time < trimRange[1] + 1.5) {
               youtubePlayerRef.current.seekTo(trimRange[0], true);
             }
           }
@@ -1379,14 +1418,30 @@ export default function ClipFlowEditor() {
 
   const seekToPosition = (newTime: number) => {
     const targetTime = Math.max(0, Math.min(newTime, effectiveDuration > 0 ? effectiveDuration : newTime));
+    seekOriginTimeRef.current = currentTime;
     pendingSeekTimeRef.current = targetTime;
     isSeekingRef.current = true;
+    lastSeekTimeRef.current = Date.now();
     setCurrentTime(targetTime);
 
     if (youtubeId && youtubePlayerRef.current) {
-      try { youtubePlayerRef.current.seekTo(targetTime, true); } catch (e) { }
-      isSeekingRef.current = false;
-      pendingSeekTimeRef.current = null;
+      try {
+        youtubePlayerRef.current.seekTo(targetTime, true);
+        if (isPlaying) {
+          try { youtubePlayerRef.current.playVideo(); } catch { }
+        }
+      } catch (e) {
+        console.warn('[ClipFlow Seek Error]', e);
+      }
+      if (!isPlaying) {
+        setTimeout(() => {
+          if (!isPlaying) {
+            isSeekingRef.current = false;
+            pendingSeekTimeRef.current = null;
+            seekOriginTimeRef.current = null;
+          }
+        }, 300);
+      }
     } else if (isLiveChannelUrl) {
       isBufferingAtBoundaryRef.current = false;
       const chunkOffset = Math.floor(targetTime / 5) * 5;
@@ -1833,95 +1888,6 @@ export default function ClipFlowEditor() {
     return sourceAspectRatio * (w / h);
   }, [aspectRatio, cropBox.width, cropBox.height, sourceAspectRatio]);
 
-  // Real-time Canvas Frame Extractor & Output Preview Renderer
-  const renderOutputPreview = useCallback(() => {
-    const canvas = outputCanvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    // Grab frame from active video element (supports Twitch live double-buffered Player A/B and standard player)
-    const activeVideo = isLiveChannelUrl
-      ? (activeLivePlayer === 'A' ? videoAElementRef.current : videoBElementRef.current)
-      : videoElementRef.current;
-
-    if (
-      activeVideo &&
-      activeVideo.readyState >= 2 &&
-      activeVideo.videoWidth > 0 &&
-      activeVideo.videoHeight > 0
-    ) {
-      const vw = activeVideo.videoWidth;
-      const vh = activeVideo.videoHeight;
-
-      if (videoDimensions.width !== vw || videoDimensions.height !== vh) {
-        setVideoDimensions({ width: vw, height: vh });
-      }
-
-      const sx = Math.max(0, Math.min(vw - 1, (cropBox.x || 0) * vw));
-      const sy = Math.max(0, Math.min(vh - 1, (cropBox.y || 0) * vh));
-      const sw = Math.max(1, Math.min(vw - sx, (cropBox.width || 1) * vw));
-      const sh = Math.max(1, Math.min(vh - sy, (cropBox.height || 1) * vh));
-
-      const targetW = Math.round(sw);
-      const targetH = Math.round(sh);
-      if (canvas.width !== targetW || canvas.height !== targetH) {
-        canvas.width = targetW;
-        canvas.height = targetH;
-      }
-
-      try {
-        ctx.drawImage(activeVideo, sx, sy, sw, sh, 0, 0, targetW, targetH);
-        return;
-      } catch {
-        // Fall through to image fallback on CORS block
-      }
-    }
-
-    // Fallback: If YouTube or video element not ready yet, draw from thumbnail
-    const thumbSrc = metadata?.thumbnail || (youtubeId ? `https://img.youtube.com/vi/${youtubeId}/maxresdefault.jpg` : '');
-    if (thumbSrc) {
-      const img = new Image();
-      img.crossOrigin = 'anonymous';
-      img.src = thumbSrc;
-      img.onload = () => {
-        const iw = img.naturalWidth || 1920;
-        const ih = img.naturalHeight || 1080;
-        const sx = Math.max(0, Math.min(iw - 1, (cropBox.x || 0) * iw));
-        const sy = Math.max(0, Math.min(ih - 1, (cropBox.y || 0) * ih));
-        const sw = Math.max(1, Math.min(iw - sx, (cropBox.width || 1) * iw));
-        const sh = Math.max(1, Math.min(ih - sy, (cropBox.height || 1) * ih));
-
-        const targetW = Math.round(sw);
-        const targetH = Math.round(sh);
-        if (canvas.width !== targetW || canvas.height !== targetH) {
-          canvas.width = targetW;
-          canvas.height = targetH;
-        }
-        try {
-          ctx.drawImage(img, sx, sy, sw, sh, 0, 0, targetW, targetH);
-        } catch { }
-      };
-    }
-  }, [isLiveChannelUrl, activeLivePlayer, cropBox, metadata, youtubeId, videoDimensions.width, videoDimensions.height]);
-
-  // Synchronize canvas output preview on seek, timeupdate, crop change, or ratio change
-  useEffect(() => {
-    renderOutputPreview();
-  }, [renderOutputPreview, currentTime, cropBox, aspectRatio]);
-
-  // Smooth continuous canvas output preview rendering while video is playing
-  useEffect(() => {
-    if (!isPlaying) return;
-    let animId: number;
-    const loop = () => {
-      renderOutputPreview();
-      animId = requestAnimationFrame(loop);
-    };
-    animId = requestAnimationFrame(loop);
-    return () => cancelAnimationFrame(animId);
-  }, [isPlaying, renderOutputPreview]);
-
   // Seek backward/forward by seconds
   const seekRelative = (seconds: number) => {
     const maxDur = metadata?.duration || 99999;
@@ -2088,7 +2054,7 @@ export default function ClipFlowEditor() {
         trimEnd: effectiveTrimEnd,
         duration: metadata?.duration || 0,
         aspectRatio: aspectRatio === '16:9' ? undefined : aspectRatio,
-        cropBox: aspectRatio === '16:9' ? undefined : cropBox,
+        cropBox: (aspectRatio === 'custom' || fitMode === 'crop') ? cropBox : undefined,
         fitMode: fitMode,
         cropPosition: cropPosition,
         customFileName: customFileName || metadata?.title || 'ClipFlow_Video',
@@ -2397,28 +2363,41 @@ export default function ClipFlowEditor() {
                   {/* Fixed Aspect Frame Device Box */}
                   <div
                     onClick={(e) => {
-                      if (e.target === e.currentTarget && aspectRatio === '16:9') {
-                        togglePlay();
+                      if (aspectRatio === '16:9' || isPadMode) {
+                        if (!youtubeId || e.target === e.currentTarget || e.target === videoCanvasRef.current) {
+                          togglePlay();
+                        }
                       }
                     }}
-                    className={`relative w-full h-full flex items-center justify-center overflow-hidden group select-none ${aspectRatio === '16:9' ? 'cursor-pointer' : 'cursor-default'
-                      }`}
+                    className={`relative w-full h-full flex items-center justify-center overflow-hidden group select-none ${
+                      (aspectRatio === '16:9' || isPadMode) ? 'cursor-pointer' : 'cursor-default'
+                    }`}
                   >
                     {/* Universal HTML5 Video Canvas with Interactive Framing Overlay */}
                     <div
                       ref={videoCanvasRef}
                       style={{
-                        aspectRatio: `${sourceAspectRatio}`,
+                        aspectRatio: `${currentContainerAspect}`,
                       }}
-                      className="relative h-full max-h-full max-w-full w-auto bg-black rounded-xl overflow-hidden flex items-center justify-center shadow-2xl border border-white/10 select-none"
+                      className={`relative h-full max-h-full max-w-full w-auto bg-black rounded-xl overflow-hidden flex items-center justify-center shadow-2xl transition-[aspect-ratio] duration-200 select-none ${
+                        isPadMode ? 'border-2 border-white/25 shadow-[0_0_25px_rgba(0,0,0,0.8)]' : 'border border-white/10'
+                      }`}
                     >
                       <div className="w-full h-full relative flex items-center justify-center overflow-hidden bg-black">
                         {youtubeId ? (
-                          <div className="w-full h-full relative flex items-center justify-center overflow-hidden pointer-events-none select-none">
+                          <div
+                            style={isPadMode ? { aspectRatio: `${sourceAspectRatio}`, width: '100%', margin: 'auto 0' } : undefined}
+                            className={`${isPadMode ? 'w-full' : 'w-full h-full'} relative flex items-center justify-center overflow-hidden select-none ${
+                            (isDraggingHSplitter || isDraggingVSplitter || isDraggingLSplitter) ? 'pointer-events-none' : 'pointer-events-auto'
+                          }`}>
                             <YouTube
                               videoId={youtubeId}
-                              className="w-full h-full flex items-center justify-center pointer-events-none"
-                              iframeClassName="w-full h-full block border-0 pointer-events-none"
+                              className={`w-full h-full flex items-center justify-center ${
+                                (isDraggingHSplitter || isDraggingVSplitter || isDraggingLSplitter) ? 'pointer-events-none' : 'pointer-events-auto'
+                              }`}
+                              iframeClassName={`w-full h-full block border-0 ${
+                                (isDraggingHSplitter || isDraggingVSplitter || isDraggingLSplitter) ? 'pointer-events-none' : 'pointer-events-auto'
+                              }`}
                               opts={{
                                 width: '100%',
                                 height: '100%',
@@ -2470,13 +2449,29 @@ export default function ClipFlowEditor() {
                                 setIsPlaying(false);
                                 setIsVideoBuffering(false);
                               }}
-                              onStateChange={(e) => {
+                              onStateChange={async (e) => {
                                 if (e.data === 1) {
                                   setIsPlaying(true);
                                   setIsVideoBuffering(false);
+                                  if (isSeekingRef.current && pendingSeekTimeRef.current !== null) {
+                                    try {
+                                      const time = await e.target.getCurrentTime();
+                                      if (Math.abs(time - pendingSeekTimeRef.current) < 1.5) {
+                                        isSeekingRef.current = false;
+                                        pendingSeekTimeRef.current = null;
+                                        seekOriginTimeRef.current = null;
+                                        setCurrentTime(time);
+                                      }
+                                    } catch { }
+                                  }
                                 } else if (e.data === 2) {
                                   setIsPlaying(false);
                                   setIsVideoBuffering(false);
+                                  if (isSeekingRef.current) {
+                                    isSeekingRef.current = false;
+                                    pendingSeekTimeRef.current = null;
+                                    seekOriginTimeRef.current = null;
+                                  }
                                 } else if (e.data === 3) {
                                   setIsVideoBuffering(true);
                                 } else if (e.data === 0) {
@@ -2719,7 +2714,7 @@ export default function ClipFlowEditor() {
                         )}
 
                         {/* Interactive Dynamic Crop Framing Box Overlay */}
-                        {aspectRatio !== '16:9' && (
+                        {aspectRatio !== '16:9' && (aspectRatio === 'custom' || fitMode === 'crop') && (
                           <CropFrameOverlay
                             cropBox={cropBox}
                             onChange={handleCropBoxChange}
@@ -2728,6 +2723,17 @@ export default function ClipFlowEditor() {
                             aspectRatio={aspectRatio}
                             sourceAspectRatio={sourceAspectRatio}
                           />
+                        )}
+
+                        {/* Framing Badge in Fit Mode */}
+                        {isPadMode && (
+                          <div className="absolute top-2.5 left-2.5 z-20 pointer-events-none select-none">
+                            <span className="bg-black/85 backdrop-blur-md px-2.5 py-1 rounded-full text-[10px] font-extrabold text-white border border-white/20 shadow-lg flex items-center gap-1.5">
+                              <span>{aspectRatio}</span>
+                              <span className="text-zinc-500">•</span>
+                              <span className="text-zinc-300 font-mono text-[9px]">FIT</span>
+                            </span>
+                          </div>
                         )}
                       </div>
                     </div>
@@ -2770,9 +2776,11 @@ export default function ClipFlowEditor() {
                         min={0}
                         max={effectiveDuration > 0 ? effectiveDuration : 10}
                         onValueChange={(val) => {
+                          isSeekingRef.current = true;
+                          pendingSeekTimeRef.current = val[0];
+                          lastSeekTimeRef.current = Date.now();
                           if (!isLiveChannelUrl) {
                             setCurrentTime(val[0]);
-                            pendingSeekTimeRef.current = val[0];
                           } else {
                             isSeekingLiveRef.current = true;
                             setCurrentTime(val[0]);
@@ -3037,6 +3045,8 @@ export default function ClipFlowEditor() {
                         step={effectiveDuration <= 30 ? 0.1 : 0.5}
                         minStepsBetweenThumbs={0.1}
                         onValueChange={(val) => {
+                          isSeekingRef.current = true;
+                          lastSeekTimeRef.current = Date.now();
                           setTrimRange([val[0], val[1]]);
                           if (!isLiveChannelUrl) {
                             if (val[0] !== trimRange[0]) {
@@ -3053,6 +3063,10 @@ export default function ClipFlowEditor() {
                             seekToPosition(val[0]);
                           } else if (val[1] !== trimRange[1]) {
                             seekToPosition(val[1]);
+                          } else {
+                            isSeekingRef.current = false;
+                            pendingSeekTimeRef.current = null;
+                            seekOriginTimeRef.current = null;
                           }
                         }}
                       >
@@ -3318,60 +3332,81 @@ export default function ClipFlowEditor() {
                     })}
                   </div>
 
-                  {/* Interactive Crop Frame Controls & Real-Time Output Preview */}
-                  {aspectRatio !== '16:9' && (
-                    <div className="space-y-3 p-3 rounded-xl bg-zinc-950/90 border border-white/10">
+                  {/* Framing Mode: Fit vs Cropped (For 9:16, 1:1, 4:5 presets) */}
+                  {(aspectRatio === '9:16' || aspectRatio === '1:1' || aspectRatio === '4:5') && (
+                    <div className="p-2.5 rounded-xl bg-zinc-950/80 border border-white/10 space-y-2">
                       <div className="flex items-center justify-between">
-                        <span className="text-[11px] font-semibold text-zinc-200 flex items-center gap-1.5">
-                          <Crop className="w-3.5 h-3.5 text-zinc-400" />
-                          <span>Output Preview</span>
-                        </span>
-                        <div className="flex items-center gap-1.5">
-                          <button
-                            type="button"
-                            onClick={centerCropBox}
-                            className="px-2 py-1 rounded-md text-[10px] font-semibold bg-white/10 hover:bg-white/20 text-gray-200 hover:text-white transition-all cursor-pointer border border-white/10"
-                            title="Center the crop framing box"
-                          >
-                            Center
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => applyAspectRatio('16:9')}
-                            className="px-2 py-1 rounded-md text-[10px] font-semibold bg-red-500/10 hover:bg-red-500/20 text-red-300 border border-red-500/20 transition-all cursor-pointer"
-                            title="Reset to full 16:9 frame"
-                          >
-                            Reset
-                          </button>
+                        <span className="text-[11px] font-bold text-zinc-300 uppercase tracking-wider">Framing Mode</span>
+                        <div className="flex items-center gap-2">
+                          {fitMode === 'crop' && (
+                            <button
+                              type="button"
+                              onClick={centerCropBox}
+                              className="px-2 py-0.5 rounded text-[10px] font-semibold bg-white/10 hover:bg-white/20 text-gray-200 hover:text-white transition-all cursor-pointer border border-white/10"
+                              title="Center the crop framing box"
+                            >
+                              Center
+                            </button>
+                          )}
+                          <span className="text-[10px] text-zinc-400 font-mono">
+                            {fitMode === 'pad' ? 'Letterbox (Black Bars)' : 'Crop & Fill'}
+                          </span>
                         </div>
                       </div>
-
-                      {/* Live Cropped Output Preview Box */}
-                      <div className="w-full bg-black/60 rounded-xl p-2.5 border border-white/10 flex flex-col items-center justify-center gap-2">
-                        <div
-                          className="relative bg-black rounded-lg overflow-hidden border border-white/20 shadow-xl flex items-center justify-center max-h-[190px] w-auto max-w-full transition-all duration-75 select-none"
-                          style={{
-                            aspectRatio: `${outputAspectRatioValue}`,
-                          }}
+                      <div className="grid grid-cols-2 gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => setFitMode('pad')}
+                          className={`py-2 px-2.5 rounded-lg border flex items-center justify-center gap-2 transition-all cursor-pointer text-xs font-bold ${
+                            fitMode === 'pad'
+                              ? 'bg-white text-black border-white shadow-md'
+                              : 'bg-zinc-900/90 border-white/10 text-zinc-400 hover:text-white hover:bg-white/[0.06]'
+                          }`}
+                          title="Fit entire video inside the frame with top and bottom black bars (no content cropped out)"
                         >
-                          <canvas
-                            ref={outputCanvasRef}
-                            className="w-full h-full object-contain pointer-events-none select-none block"
-                          />
-                        </div>
+                          <Minimize2 className={`w-3.5 h-3.5 ${fitMode === 'pad' ? 'text-black' : 'text-zinc-400'}`} />
+                          <div className="flex flex-col text-left">
+                            <span className="leading-tight">Fit</span>
+                            <span className={`text-[8px] font-normal leading-tight ${fitMode === 'pad' ? 'text-zinc-700' : 'text-zinc-500'}`}>
+                              Full Video (Black Bars)
+                            </span>
+                          </div>
+                        </button>
 
-                        {/* Ratio & Dimension Info */}
-                        <div className="flex items-center justify-between w-full px-1 text-[10px] text-zinc-400 font-mono">
-                          <span className="text-purple-300 font-bold">
-                            {aspectRatio === 'custom'
-                              ? `Ratio: ${outputAspectRatioValue >= 1 ? `${outputAspectRatioValue.toFixed(2)}:1` : `1:${(1 / outputAspectRatioValue).toFixed(2)}`}`
-                              : `Ratio: ${aspectRatio}`}
-                          </span>
-                          <span className="text-zinc-300">
-                            {`${Math.round(cropBox.width * 100)}%w × ${Math.round(cropBox.height * 100)}%h`}
-                          </span>
-                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setFitMode('crop')}
+                          className={`py-2 px-2.5 rounded-lg border flex items-center justify-center gap-2 transition-all cursor-pointer text-xs font-bold ${
+                            fitMode === 'crop'
+                              ? 'bg-white text-black border-white shadow-md'
+                              : 'bg-zinc-900/90 border-white/10 text-zinc-400 hover:text-white hover:bg-white/[0.06]'
+                          }`}
+                          title="Fill the entire frame by cropping edges with interactive framing"
+                        >
+                          <Crop className={`w-3.5 h-3.5 ${fitMode === 'crop' ? 'text-black' : 'text-zinc-400'}`} />
+                          <div className="flex flex-col text-left">
+                            <span className="leading-tight">Cropped</span>
+                            <span className={`text-[8px] font-normal leading-tight ${fitMode === 'crop' ? 'text-zinc-700' : 'text-zinc-500'}`}>
+                              Fill Frame
+                            </span>
+                          </div>
+                        </button>
                       </div>
+                    </div>
+                  )}
+
+                  {/* Custom Crop Controls (Only for custom aspect ratio) */}
+                  {aspectRatio === 'custom' && (
+                    <div className="p-2.5 rounded-xl bg-zinc-950/80 border border-white/10 flex items-center justify-between">
+                      <span className="text-[11px] font-bold text-zinc-300 uppercase tracking-wider">Custom Crop</span>
+                      <button
+                        type="button"
+                        onClick={centerCropBox}
+                        className="px-2.5 py-1 rounded-lg text-xs font-semibold bg-white/10 hover:bg-white/20 text-gray-200 hover:text-white transition-all cursor-pointer border border-white/10"
+                        title="Center the crop framing box"
+                      >
+                        Center Box
+                      </button>
                     </div>
                   )}
                 </div>
