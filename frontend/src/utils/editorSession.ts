@@ -39,14 +39,20 @@ export interface EditorSessionState {
   videoHeight?: number;
   rightPanelWidth?: number;
   leftSidebarWidth?: number;
+  volume?: number;
+  isMuted?: boolean;
   savedAt: number;
 }
 
 const SESSION_KEY = 'clipflow_active_editor_session';
 
+function getUrlSessionKey(url: string): string {
+  return `clipflow_url_session_${encodeURIComponent(url.trim().replace(/\/+$/, ''))}`;
+}
+
 /**
- * Persist editor state in sessionStorage (persists across internal tab changes like Cloud/Settings,
- * and automatically clears when the browser tab/page is closed).
+ * Persist editor state in localStorage and sessionStorage so that
+ * user clippings, progress line, volume, and settings are never lost on reload.
  */
 export function saveEditorSession(state: Partial<EditorSessionState>) {
   try {
@@ -54,7 +60,7 @@ export function saveEditorSession(state: Partial<EditorSessionState>) {
     if (state.processingMode) {
       setStoredProcessingMode(state.processingMode);
     }
-    const existing = getEditorSession();
+    const existing = getEditorSession(state.activeUrl);
     const mode = state.processingMode || state.exportMode || existing?.processingMode || getStoredProcessingMode() || 'free';
     const merged: EditorSessionState = {
       ...(existing || {
@@ -74,6 +80,8 @@ export function saveEditorSession(state: Partial<EditorSessionState>) {
         customFileName: '',
         exportMode: mode,
         processingMode: mode,
+        volume: 1,
+        isMuted: false,
         savedAt: Date.now(),
       }),
       ...state,
@@ -81,34 +89,123 @@ export function saveEditorSession(state: Partial<EditorSessionState>) {
       processingMode: mode,
       savedAt: Date.now(),
     };
-    sessionStorage.setItem(SESSION_KEY, JSON.stringify(merged));
+
+    const serialized = JSON.stringify(merged);
+    // 1. Save to active session storage
+    try { sessionStorage.setItem(SESSION_KEY, serialized); } catch {}
+    // 2. Save to global local storage (persists across tab closes)
+    try { localStorage.setItem(SESSION_KEY, serialized); } catch {}
+    // 3. Save to per-URL local storage key
+    try { localStorage.setItem(getUrlSessionKey(state.activeUrl), serialized); } catch {}
   } catch (e) {
     console.warn('[Editor Session] Failed to save session:', e);
   }
 }
 
+/** Time-to-Live (TTL): 1 week in milliseconds (all editor sessions older than 7 days are auto-deleted) */
+export const TTL_ONE_WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+
+function isSessionExpired(session: EditorSessionState | null): boolean {
+  if (!session || !session.savedAt) return false;
+  return Date.now() - session.savedAt > TTL_ONE_WEEK_MS;
+}
+
 /**
- * Retrieve saved editor session.
+ * Automatically delete all editor sessions older than 1 week (TTL) from localStorage.
+ */
+export function cleanExpiredEditorSessions(): void {
+  try {
+    const now = Date.now();
+    const expireThreshold = now - TTL_ONE_WEEK_MS;
+    const keysToRemove: string[] = [];
+
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key && (key.startsWith('clipflow_url_session_') || key === SESSION_KEY)) {
+        try {
+          const raw = localStorage.getItem(key);
+          if (raw) {
+            const parsed = JSON.parse(raw);
+            if (parsed && parsed.savedAt && parsed.savedAt < expireThreshold) {
+              keysToRemove.push(key);
+            }
+          }
+        } catch {}
+      }
+    }
+
+    keysToRemove.forEach((k) => localStorage.removeItem(k));
+  } catch {}
+}
+
+// Auto-run cleanup on module load in browser
+if (typeof window !== 'undefined') {
+  setTimeout(() => {
+    cleanExpiredEditorSessions();
+  }, 1000);
+}
+
+/**
+ * Retrieve saved editor session from localStorage or sessionStorage.
+ * Discards and cleans any session older than 1 week.
  */
 export function getEditorSession(forUrl?: string): EditorSessionState | null {
   try {
-    const raw = sessionStorage.getItem(SESSION_KEY);
-    if (!raw) return null;
-    const data: EditorSessionState = JSON.parse(raw);
-    if (forUrl && data.activeUrl !== forUrl) {
-      return null;
+    // 1. If specific URL requested, check URL-specific localStorage first
+    if (forUrl) {
+      const urlKey = getUrlSessionKey(forUrl);
+      const urlData = localStorage.getItem(urlKey);
+      if (urlData) {
+        const parsed: EditorSessionState = JSON.parse(urlData);
+        if (isSessionExpired(parsed)) {
+          localStorage.removeItem(urlKey);
+        } else {
+          return parsed;
+        }
+      }
     }
-    return data;
+
+    // 2. Check active sessionStorage
+    const rawSession = sessionStorage.getItem(SESSION_KEY);
+    if (rawSession) {
+      const parsed: EditorSessionState = JSON.parse(rawSession);
+      if (!forUrl || parsed.activeUrl === forUrl) {
+        if (isSessionExpired(parsed)) {
+          sessionStorage.removeItem(SESSION_KEY);
+        } else {
+          return parsed;
+        }
+      }
+    }
+
+    // 3. Fallback to active localStorage
+    const rawLocal = localStorage.getItem(SESSION_KEY);
+    if (rawLocal) {
+      const parsed: EditorSessionState = JSON.parse(rawLocal);
+      if (!forUrl || parsed.activeUrl === forUrl) {
+        if (isSessionExpired(parsed)) {
+          localStorage.removeItem(SESSION_KEY);
+        } else {
+          return parsed;
+        }
+      }
+    }
+
+    return null;
   } catch {
     return null;
   }
 }
 
 /**
- * Clear editor session on close or reset.
+ * Clear editor session on explicit reset.
  */
-export function clearEditorSession() {
+export function clearEditorSession(forUrl?: string) {
   try {
+    if (forUrl) {
+      localStorage.removeItem(getUrlSessionKey(forUrl));
+    }
     sessionStorage.removeItem(SESSION_KEY);
+    localStorage.removeItem(SESSION_KEY);
   } catch {}
 }

@@ -11,6 +11,12 @@
  */
 
 import { useState, useEffect, useCallback, useRef } from 'react';
+import {
+  saveTwitchChunkToStorage,
+  getTwitchChunkFromStorage,
+  getAllCachedTwitchOffsets,
+  getTwitchSession,
+} from '../../utils/twitchChunkStorage';
 
 const BACKEND_URL = (import.meta.env.VITE_BACKEND_URL as string) ||
   ((typeof window !== 'undefined' && window.location.port !== '5173')
@@ -48,6 +54,8 @@ export interface TwitchLiveChannelState {
   chunkError: string;
   /** The global time offset (seconds) the current chunk starts at */
   chunkStartOffset: number;
+  /** Array of chunk offsets stored locally in IndexedDB */
+  cachedOffsets: number[];
   /** Get a chunk URL by explicit offset (from cache or network) */
   getChunk: (targetOffset: number, signal?: AbortSignal) => Promise<string>;
   /** Check if a chunk is already cached */
@@ -82,6 +90,7 @@ export function useTwitchLiveChannel(
   const [isLoadingChunk, setIsLoadingChunk] = useState(false);
   const [chunkError, setChunkError] = useState('');
   const [chunkStartOffset, setChunkStartOffset] = useState(0);
+  const [cachedOffsets, setCachedOffsets] = useState<number[]>([]);
 
   // Cache of prefetched chunks keyed by start timestamp in seconds: Map<offset, blobUrl>
   const chunkCacheRef = useRef<Map<number, string>>(new Map());
@@ -102,7 +111,7 @@ export function useTwitchLiveChannel(
     chunkCacheRef.current.clear();
   }, []);
 
-  // Helper to fetch a specific 5-second chunk blob
+  // Helper to fetch a specific 5-second chunk blob (with IndexedDB persistent caching)
   const fetchSingleChunk = useCallback(async (
     targetOffset: number,
     signal?: AbortSignal
@@ -120,6 +129,20 @@ export function useTwitchLiveChannel(
     }
 
     const promise = (async () => {
+      // 3. Check persistent IndexedDB local storage before making any network/daemon call
+      try {
+        const storedBlob = await getTwitchChunkFromStorage(channelUrl, targetOffset);
+        if (storedBlob && storedBlob.size > 0) {
+          const localUrl = URL.createObjectURL(storedBlob);
+          chunkCacheRef.current.set(targetOffset, localUrl);
+          setCachedOffsets((prev) => Array.from(new Set([...prev, targetOffset])).sort((a, b) => a - b));
+          console.log(`%c[ClipFlow ⚡ INSTANT LOCAL CHUNK] Loaded chunk @ t=${targetOffset}s from IndexedDB (${(storedBlob.size / 1024).toFixed(1)} KB)`, 'color: #10b981; font-weight: bold;');
+          return localUrl;
+        }
+      } catch (e) {
+        console.warn('[Twitch Live] IndexedDB lookup error:', e);
+      }
+
       const encodedUrl = encodeURIComponent(channelUrl);
 
       let res: Response;
@@ -158,8 +181,13 @@ export function useTwitchLiveChannel(
       const objectUrl = URL.createObjectURL(blob);
       chunkCacheRef.current.set(targetOffset, objectUrl);
 
-      // Limit cache size to 16 chunks (80 seconds of video), evicting oldest non-active
-      if (chunkCacheRef.current.size > 16) {
+      // Persist chunk to IndexedDB so user can scrub back or reload without refetching!
+      saveTwitchChunkToStorage(channelUrl, targetOffset, blob).then(() => {
+        setCachedOffsets((prev) => Array.from(new Set([...prev, targetOffset])).sort((a, b) => a - b));
+      }).catch(() => {});
+
+      // Limit memory cache size to 32 chunks, evicting oldest non-active object URLs
+      if (chunkCacheRef.current.size > 32) {
         const oldestKey = Array.from(chunkCacheRef.current.keys())[0];
         if (oldestKey !== currentOffsetRef.current && oldestKey !== targetOffset && oldestKey !== currentOffsetRef.current + CHUNK_DURATION) {
           const oldUrl = chunkCacheRef.current.get(oldestKey);
@@ -332,7 +360,7 @@ export function useTwitchLiveChannel(
     }
   }, [prefetchUpcomingChunks]);
 
-  // Initial load
+  // Initial load: restore saved progress position and load cached offsets from IndexedDB
   useEffect(() => {
     if (!isActive || !channelUrl) {
       clearCache();
@@ -340,9 +368,22 @@ export function useTwitchLiveChannel(
       setNextChunkUrl('');
       setChunkStartOffset(0);
       setChunkError('');
+      setCachedOffsets([]);
       return;
     }
-    loadChunk(0);
+
+    // Retrieve saved progress line offset from local storage
+    const saved = getTwitchSession(channelUrl);
+    const initialOffset = (saved && saved.currentTime > 0)
+      ? Math.floor(saved.currentTime / CHUNK_DURATION) * CHUNK_DURATION
+      : 0;
+
+    // Load list of all cached chunk offsets in IndexedDB for visual progress line indicators
+    getAllCachedTwitchOffsets(channelUrl).then((offsets) => {
+      setCachedOffsets(offsets);
+    }).catch(() => {});
+
+    loadChunk(initialOffset);
   }, [isActive, channelUrl, loadChunk, clearCache]);
 
   // Unmount cleanup
@@ -358,6 +399,7 @@ export function useTwitchLiveChannel(
     isLoadingChunk,
     chunkError,
     chunkStartOffset,
+    cachedOffsets,
     getChunk: fetchSingleChunk,
     hasChunk,
     getCachedChunk,
@@ -370,3 +412,4 @@ export function useTwitchLiveChannel(
     retryChunk: () => loadChunk(chunkStartOffset, true),
   };
 }
+

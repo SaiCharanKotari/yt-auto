@@ -30,7 +30,8 @@ import { EditorSidebar } from '../components/EditorSidebar';
 import { CropFrameOverlay, type CropBox } from '../components/CropFrameOverlay';
 import { useTwitchPreview } from '../components/Twitch/useTwitchPreview';
 import { useTwitchLiveChannel, isTwitchLiveChannelUrl } from '../components/Twitch/useTwitchLiveChannel';
-import { getCachedMetadata, setCachedMetadata, clearCachedMetadata } from '../utils/metadataCache';
+import { saveTwitchSession, getTwitchSession } from '../utils/twitchChunkStorage';
+import { getCachedMetadata, setCachedMetadata } from '../utils/metadataCache';
 import {
   getEditorSession,
   saveEditorSession,
@@ -104,19 +105,18 @@ export default function ClipFlowEditor() {
   const navigate = useNavigate();
   const rawUrl = searchParams.get('url') || '';
 
-  // Retrieve cached editor session (persists when navigating between Studio, Cloud, Settings)
+  // Retrieve cached editor session (persists across reloads and tab navigation)
   const initialSession = useMemo(() => {
     return getEditorSession(rawUrl || undefined);
   }, [rawUrl]);
 
-  useEffect(() => {
-    const handleBeforeUnload = () => {
-      clearCachedMetadata();
-      clearEditorSession();
-    };
-    window.addEventListener('beforeunload', handleBeforeUnload);
-    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
-  }, []);
+  // Initial Twitch session if applicable
+  const initialTwitchSession = useMemo(() => {
+    if (rawUrl && isTwitchLiveChannelUrl(rawUrl)) {
+      return getTwitchSession(rawUrl);
+    }
+    return null;
+  }, [rawUrl]);
 
   const [activeUrl, setActiveUrl] = useState(rawUrl || initialSession?.activeUrl || '');
   const youtubeId = extractYouTubeId(activeUrl);
@@ -205,12 +205,21 @@ export default function ClipFlowEditor() {
   const seekOriginTimeRef = useRef<number | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isVideoBuffering, setIsVideoBuffering] = useState(false);
-  const [currentTime, setCurrentTime] = useState(initialSession?.currentTime || 0);
-  const [actualDuration, setActualDuration] = useState<number>(initialSession?.metadata?.duration || 0);
+  const [currentTime, setCurrentTime] = useState(() => {
+    if (initialTwitchSession && initialTwitchSession.currentTime > 0) return initialTwitchSession.currentTime;
+    return initialSession?.currentTime || 0;
+  });
+  const [actualDuration, setActualDuration] = useState<number>(() => {
+    if (initialTwitchSession && initialTwitchSession.effectiveDuration > 0) return initialTwitchSession.effectiveDuration;
+    return initialSession?.metadata?.duration || 0;
+  });
   const [isEditingTime, setIsEditingTime] = useState(false);
   const [timeInputValue, setTimeInputValue] = useState('');
   const isTrimEnabled = true;
-  const [trimRange, setTrimRange] = useState<[number, number]>(initialSession?.trimRange || [0, 60]);
+  const [trimRange, setTrimRange] = useState<[number, number]>(() => {
+    if (initialTwitchSession && initialTwitchSession.trimRange) return initialTwitchSession.trimRange;
+    return initialSession?.trimRange || [0, 60];
+  });
   // Moved up: needed by useTwitchLiveChannel hook below
   const [isHelperRunning, setIsHelperRunning] = useState<boolean>(false);
 
@@ -287,6 +296,7 @@ export default function ClipFlowEditor() {
     isLoadingChunk: isLiveChunkLoading,
     chunkError: liveChunkError,
     chunkStartOffset: liveChunkOffset,
+    cachedOffsets: liveCachedOffsets,
     getChunk: getLiveChunk,
     hasChunk: hasLiveChunk,
     getCachedChunk: getCachedLiveChunk,
@@ -309,21 +319,90 @@ export default function ClipFlowEditor() {
 
   const effectiveDuration = actualDuration > 0 ? actualDuration : (metadata?.duration && metadata.duration > 0 ? metadata.duration : 0);
 
-  const [volume] = useState<number>(1);
-  const [isMuted, setIsMuted] = useState<boolean>(false);
+  const [volume, setVolume] = useState<number>(() => {
+    try {
+      const v = localStorage.getItem('clipflow_volume');
+      if (v !== null) return parseFloat(v);
+    } catch {}
+    if (initialTwitchSession?.volume !== undefined) return initialTwitchSession.volume;
+    return initialSession?.volume !== undefined ? initialSession.volume : 1;
+  });
+  const [isMuted, setIsMuted] = useState<boolean>(() => {
+    try {
+      const m = localStorage.getItem('clipflow_muted');
+      if (m !== null) return m === 'true';
+    } catch {}
+    if (initialTwitchSession?.isMuted !== undefined) return initialTwitchSession.isMuted;
+    return initialSession?.isMuted !== undefined ? initialSession.isMuted : false;
+  });
+
+  const handleVolumeChange = (newVolume: number) => {
+    const clamped = Math.max(0, Math.min(1, newVolume));
+    setVolume(clamped);
+    if (clamped > 0 && isMuted) {
+      setIsMuted(false);
+    } else if (clamped === 0 && !isMuted) {
+      setIsMuted(true);
+    }
+    try {
+      localStorage.setItem('clipflow_volume', String(clamped));
+      if (clamped > 0) localStorage.setItem('clipflow_muted', 'false');
+      else localStorage.setItem('clipflow_muted', 'true');
+    } catch {}
+
+    if (youtubeId && youtubePlayerRef.current) {
+      try {
+        if (clamped === 0) {
+          youtubePlayerRef.current.mute();
+        } else {
+          youtubePlayerRef.current.unMute();
+          youtubePlayerRef.current.setVolume(Math.round(clamped * 100));
+        }
+      } catch (e) {}
+    } else {
+      if (videoElementRef.current) {
+        videoElementRef.current.volume = clamped;
+        videoElementRef.current.muted = clamped === 0;
+      }
+      if (videoAElementRef.current) {
+        videoAElementRef.current.volume = clamped;
+        videoAElementRef.current.muted = clamped === 0;
+      }
+      if (videoBElementRef.current) {
+        videoBElementRef.current.volume = clamped;
+        videoBElementRef.current.muted = clamped === 0;
+      }
+    }
+  };
 
   const toggleMute = () => {
     const nextMute = !isMuted;
     setIsMuted(nextMute);
+    try {
+      localStorage.setItem('clipflow_muted', String(nextMute));
+    } catch {}
     if (youtubeId && youtubePlayerRef.current) {
       try {
-        if (nextMute) youtubePlayerRef.current.mute();
-        else youtubePlayerRef.current.unMute();
+        if (nextMute) {
+          youtubePlayerRef.current.mute();
+        } else {
+          youtubePlayerRef.current.unMute();
+          youtubePlayerRef.current.setVolume(Math.round(volume * 100));
+        }
       } catch (e) { }
     } else {
-      if (videoElementRef.current) videoElementRef.current.muted = nextMute;
-      if (videoAElementRef.current) videoAElementRef.current.muted = nextMute;
-      if (videoBElementRef.current) videoBElementRef.current.muted = nextMute;
+      if (videoElementRef.current) {
+        videoElementRef.current.muted = nextMute;
+        videoElementRef.current.volume = volume;
+      }
+      if (videoAElementRef.current) {
+        videoAElementRef.current.muted = nextMute;
+        videoAElementRef.current.volume = volume;
+      }
+      if (videoBElementRef.current) {
+        videoBElementRef.current.muted = nextMute;
+        videoBElementRef.current.volume = volume;
+      }
     }
   };
 
@@ -865,7 +944,7 @@ export default function ClipFlowEditor() {
     };
   }, []);
 
-  // Auto-persist editor session into sessionStorage (persists across Studio, Cloud, Settings navigation)
+  // Auto-persist editor session into localStorage (persists across Studio, Cloud, Settings navigation and reload)
   useEffect(() => {
     if (!activeUrl) return;
     saveEditorSession({
@@ -888,12 +967,30 @@ export default function ClipFlowEditor() {
       videoHeight,
       rightPanelWidth,
       leftSidebarWidth,
+      volume,
+      isMuted,
     });
+
+    if (isLiveChannelUrl) {
+      saveTwitchSession(activeUrl, {
+        currentTime,
+        effectiveDuration,
+        trimRange,
+        isTrimEnabled,
+        aspectRatio,
+        fitMode,
+        cropBox,
+        volume,
+        isMuted,
+        cachedOffsets: liveCachedOffsets,
+      });
+    }
   }, [
     activeUrl,
     metadata,
     currentTime,
     trimRange,
+    isTrimEnabled,
     aspectRatio,
     cropBox,
     fitMode,
@@ -909,6 +1006,11 @@ export default function ClipFlowEditor() {
     videoHeight,
     rightPanelWidth,
     leftSidebarWidth,
+    volume,
+    isMuted,
+    isLiveChannelUrl,
+    effectiveDuration,
+    liveCachedOffsets,
   ]);
 
   // Handle Left Splitter (Left Sidebar Width)
@@ -1217,7 +1319,7 @@ export default function ClipFlowEditor() {
       }
 
       // Merge enriched data into state smoothly
-      setMetadata(prev => (prev && isTwitchLiveNow ? { ...prev, ...data } : data));
+      setMetadata((prev: any) => (prev && isTwitchLiveNow ? { ...prev, ...data } : data));
       setCustomFileName(prev => prev || (data.title || ''));
       const isLive = Boolean(
         data.is_live === true ||
@@ -1887,6 +1989,7 @@ export default function ClipFlowEditor() {
     const w = cropBox.width > 0 ? cropBox.width : 1;
     return sourceAspectRatio * (w / h);
   }, [aspectRatio, cropBox.width, cropBox.height, sourceAspectRatio]);
+  void outputAspectRatioValue;
 
   // Seek backward/forward by seconds
   const seekRelative = (seconds: number) => {
@@ -2429,6 +2532,7 @@ export default function ClipFlowEditor() {
                                   e.target.mute();
                                 } else {
                                   e.target.unMute();
+                                  e.target.setVolume(Math.round(volume * 100));
                                 }
                                 const dur = e.target.getDuration();
                                 if (dur && dur > 0) {
@@ -2830,17 +2934,37 @@ export default function ClipFlowEditor() {
                           <RotateCw className="w-3.5 h-3.5 text-zinc-400" />
                         </button>
 
-                        <button
-                          onClick={toggleMute}
-                          className="p-2 rounded-lg bg-white/[0.06] hover:bg-white/[0.12] text-gray-300 hover:text-white transition-colors flex items-center justify-center shadow-sm ml-0.5"
-                          title={isMuted ? 'Unmute Audio' : 'Mute Audio'}
-                        >
-                          {isMuted ? (
-                            <VolumeX className="w-3.5 h-3.5 text-red-400" />
-                          ) : (
-                            <Volume2 className="w-3.5 h-3.5 text-zinc-300" />
-                          )}
-                        </button>
+                        {/* Volume Control (Mute Toggle + Interactive Slider) */}
+                        <div className="flex items-center gap-1.5 ml-1 bg-white/[0.04] hover:bg-white/[0.08] px-1.5 py-0.5 rounded-lg border border-white/[0.06] transition-colors">
+                          <button
+                            type="button"
+                            onClick={toggleMute}
+                            className="p-1.5 rounded-md hover:bg-white/[0.1] text-gray-300 hover:text-white transition-colors flex items-center justify-center cursor-pointer"
+                            title={isMuted || volume === 0 ? 'Unmute Audio' : `Mute Audio (${Math.round(volume * 100)}%)`}
+                          >
+                            {isMuted || volume === 0 ? (
+                              <VolumeX className="w-3.5 h-3.5 text-red-400" />
+                            ) : (
+                              <Volume2 className="w-3.5 h-3.5 text-zinc-300" />
+                            )}
+                          </button>
+                          {/* Smooth Volume Slider */}
+                          <div className="flex items-center gap-1.5 w-16 sm:w-20">
+                            <input
+                              type="range"
+                              min={0}
+                              max={1}
+                              step={0.01}
+                              value={isMuted ? 0 : volume}
+                              onChange={(e) => handleVolumeChange(parseFloat(e.target.value))}
+                              className="w-full h-1.5 bg-white/20 rounded-lg appearance-none cursor-pointer accent-white hover:accent-purple-400 transition-all"
+                              title={`Volume: ${isMuted ? 0 : Math.round(volume * 100)}%`}
+                            />
+                            <span className="text-[10px] font-mono text-zinc-400 select-none w-6 text-right hidden sm:inline-block">
+                              {isMuted ? '0%' : `${Math.round(volume * 100)}%`}
+                            </span>
+                          </div>
+                        </div>
                       </div>
 
                       {/* Time Indicator (Centered & Editable) */}
@@ -3011,6 +3135,27 @@ export default function ClipFlowEditor() {
                       />
                       <div className="absolute inset-0 bg-gradient-to-r from-black/40 via-transparent to-black/40 pointer-events-none" />
                     </div>
+
+                    {/* Locally Stored Chunks Buffer Track (Twitch Live Streams) */}
+                    {isLiveChannelUrl && liveCachedOffsets && liveCachedOffsets.length > 0 && effectiveDuration > 0 && (
+                      <div className="absolute top-0 bottom-0 left-0 right-0 pointer-events-none z-5">
+                        {liveCachedOffsets.map((offset) => {
+                          const leftPct = (offset / effectiveDuration) * 100;
+                          const widthPct = (5 / effectiveDuration) * 100;
+                          return (
+                            <div
+                              key={offset}
+                              className="absolute top-0 bottom-0 bg-emerald-500/20 border-b-2 border-emerald-400/70"
+                              style={{
+                                left: `${leftPct}%`,
+                                width: `${Math.max(widthPct, 0.4)}%`,
+                              }}
+                              title={`Stored locally @ ${offset}s - ${offset + 5}s`}
+                            />
+                          );
+                        })}
+                      </div>
+                    )}
 
                     {/* Selected region highlight */}
                     {isTrimEnabled ? (
