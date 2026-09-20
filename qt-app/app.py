@@ -28,6 +28,7 @@ try:
         build_universal_metadata_args,
         extract_twitch_live_segment,
         is_twitch_live_channel,
+        format_timestamp,
     )
 except ImportError:
     from .handlers import (
@@ -35,6 +36,7 @@ except ImportError:
         build_universal_metadata_args,
         extract_twitch_live_segment,
         is_twitch_live_channel,
+        format_timestamp,
     )
 
 # Unbuffered instant console printing
@@ -375,8 +377,13 @@ class LocalHTTPRequestHandler(BaseHTTPRequestHandler):
             print(f"[ClipFlow Helper] [INFO] Client disconnected before response delivery")
 
     def do_OPTIONS(self):
-        origin = self.headers.get("Origin", "*")
-        if self.path not in ["/status", "/health", "/"]:
+        origin = self.headers.get("Origin", "")
+        if origin and not is_origin_allowed(origin):
+            self.send_response(403)
+            self.end_headers()
+            return
+
+        if not self.path.startswith("/live-segment") and not self.path.startswith("/twitch/live-segment") and not self.path.startswith("/api/twitch-live/live-chunk"):
             print(f"[RECV] OPTIONS {self.path}")
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", origin if origin else "*")
@@ -384,25 +391,22 @@ class LocalHTTPRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Headers", "Range, Content-Type, Authorization, X-Requested-With, Accept")
         self.send_header("Access-Control-Max-Age", "86400")
         self.send_header("Content-Length", "0")
-        self.send_header("Connection", "close")
         self.end_headers()
 
     def do_HEAD(self):
         parsed = urlparse(self.path)
-        if parsed.path == "/twitch/live-segment":
+        if parsed.path in ["/twitch/live-segment", "/api/twitch-live/live-chunk"]:
             self.send_response(200)
             self.send_header("Access-Control-Allow-Origin", "*")
             self.send_header("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
             self.send_header("Access-Control-Allow-Headers", "Range, Content-Type, Authorization, X-Requested-With, Accept")
             self.send_header("Content-Type", "video/mp4")
             self.send_header("Cache-Control", "public, max-age=300")
-            self.send_header("Connection", "close")
             self.end_headers()
         elif parsed.path in ["/status", "/health", "/"]:
             self.send_response(200)
             self.send_header("Access-Control-Allow-Origin", "*")
             self.send_header("Content-Type", "application/json")
-            self.send_header("Connection", "close")
             self.end_headers()
         else:
             self.send_response(404)
@@ -423,7 +427,7 @@ class LocalHTTPRequestHandler(BaseHTTPRequestHandler):
             self._send_json(403, {"error": "Forbidden: Unauthorized Origin"}, origin)
             return
 
-        if parsed.path == "/twitch/live-segment":
+        if parsed.path in ["/twitch/live-segment", "/api/twitch-live/live-chunk"]:
             import urllib.parse
             query_params = urllib.parse.parse_qs(parsed.query)
             target_url = query_params.get("url", [""])[0].strip()
@@ -452,7 +456,8 @@ class LocalHTTPRequestHandler(BaseHTTPRequestHandler):
             chunks_dir = LOCAL_APPDATA / "temp" / "live-chunks"
             chunks_dir.mkdir(parents=True, exist_ok=True)
 
-            print(f"[CHUNK] Extracting live segment: {target_url} @ t={start_time}s (dur={chunk_duration}s)")
+            time_str = format_timestamp(start_time)
+            print(f"[CHUNK] Extracting live segment: {target_url} @ {time_str} (t={start_time}s, dur={chunk_duration}s)")
             success, chunk_path, err_msg = extract_twitch_live_segment(
                 target_url,
                 start_time,
@@ -463,7 +468,7 @@ class LocalHTTPRequestHandler(BaseHTTPRequestHandler):
             )
 
             if not success or not chunk_path or not os.path.exists(chunk_path):
-                print(f"[ERR] Live chunk extraction failed: {err_msg}")
+                print(f"[ERR] Live chunk extraction failed for {time_str}: {err_msg}")
                 self._send_json(500, {"error": err_msg or "Failed to extract live Twitch chunk via local engine"}, origin)
                 return
 
@@ -478,14 +483,13 @@ class LocalHTTPRequestHandler(BaseHTTPRequestHandler):
                 self.send_header("Cache-Control", "public, max-age=300")
                 self.send_header("X-Chunk-Start", str(start_time))
                 self.send_header("X-Chunk-Duration", str(chunk_duration))
-                self.send_header("Connection", "close")
                 self.end_headers()
 
                 with open(chunk_path, "rb") as f:
                     shutil.copyfileobj(f, self.wfile)
-                print(f"[SEND] Chunk @ t={start_time}s delivered ({size // 1024}KB)")
+                print(f"[SEND] Chunk @ {time_str} (t={start_time}s) delivered ({size // 1024}KB)")
             except Exception as e:
-                print(f"[ERR] Streaming live chunk: {e}")
+                print(f"[ERR] Streaming live chunk @ {time_str}: {e}")
         else:
             self._send_json(404, {"error": f"Endpoint '{self.path}' not found"}, origin)
             print(f"[ERR] 404 Not Found: {self.path}")

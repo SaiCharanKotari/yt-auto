@@ -54,6 +54,17 @@ const YTDLP_BIN = resolveYtDlpBinary();
 const FFMPEG_BIN = resolveFFmpegBinary();
 const LIVE_CHUNKS_DIR = path.join(resolveTempDir(), 'live-chunks');
 
+function formatSeconds(seconds: number): string {
+  const s = Math.max(0, Math.floor(seconds));
+  const hrs = Math.floor(s / 3600);
+  const mins = Math.floor((s % 3600) / 60);
+  const secs = s % 60;
+  if (hrs > 0) {
+    return `${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+  }
+  return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+}
+
 const execAsync = util.promisify(exec);
 const router = express.Router();
 
@@ -103,12 +114,13 @@ router.get('/live-chunk', async (req: Request, res: Response) => {
   const targetUrl = (req.query.url as string || '').trim();
   const startTime = Math.max(0, parseInt((req.query.t as string) || '0', 10));
   const chunkDuration = Math.min(20, Math.max(2, parseInt((req.query.dur as string) || '5', 10)));
+  const timeStr = formatSeconds(startTime);
 
   let isAborted = false;
   req.on('close', () => {
     if (!res.writableEnded) {
       isAborted = true;
-      console.log(`[Twitch Live Chunk] Client aborted request for t=${startTime}s`);
+      console.log(`[Twitch Live Chunk] Client aborted request for ${timeStr} (t=${startTime}s)`);
     }
   });
 
@@ -152,13 +164,13 @@ router.get('/live-chunk', async (req: Request, res: Response) => {
 
   // 1. Return immediately from disk cache if fresh
   if (fs.existsSync(outputPath) && fs.statSync(outputPath).size > 1000) {
-    console.log(`[Twitch Live Chunk] Instant cache hit @ t=${startTime}s (${Math.round(fs.statSync(outputPath).size / 1024)}KB)`);
+    console.log(`[Twitch Live Chunk] Instant cache hit @ ${timeStr} (t=${startTime}s, ${Math.round(fs.statSync(outputPath).size / 1024)}KB)`);
     return serveChunk();
   }
 
   // 2. If another request is currently extracting this exact chunk, await it instead of running parallel FFmpegs
   if (inFlightExtractions.has(hash)) {
-    console.log(`[Twitch Live Chunk] Joining existing extraction in-flight @ t=${startTime}s`);
+    console.log(`[Twitch Live Chunk] Joining existing extraction in-flight @ ${timeStr} (t=${startTime}s)`);
     try {
       await inFlightExtractions.get(hash);
       return serveChunk();
@@ -167,13 +179,13 @@ router.get('/live-chunk', async (req: Request, res: Response) => {
     }
   }
 
-  console.log(`\n[Twitch Live Chunk] Request: ${targetUrl} @ t=${startTime}s (dur: ${chunkDuration}s)`);
+  console.log(`\n[Twitch Live Chunk] Request: ${targetUrl} @ ${timeStr} (t=${startTime}s, dur: ${chunkDuration}s)`);
 
   const extractionPromise = (async () => {
     // Get cached or fresh 720p stream URL
     let { streamUrl, sourceType } = await TwitchStreamResolverService.resolveStreamUrl(targetUrl, YTDLP_BIN, '720p');
 
-    console.log(`[Twitch Live Chunk] Extracting ${chunkDuration}s at t=${startTime}s (${sourceType} mode)...`);
+    console.log(`[Twitch Live Chunk] Extracting ${chunkDuration}s at ${timeStr} (t=${startTime}s, ${sourceType} mode)...`);
     const ffCmd = `"${FFMPEG_BIN}" -y -ss ${startTime} -i "${streamUrl}" -t ${chunkDuration} -c copy -movflags +faststart -bsf:a aac_adtstoasc "${outputPath}"`;
 
     const t0 = Date.now();
@@ -181,7 +193,7 @@ router.get('/live-chunk', async (req: Request, res: Response) => {
       await execAsync(ffCmd, { timeout: 20000 });
     } catch (ffErr: any) {
       if (isAborted) return;
-      console.warn(`[Twitch Live Chunk] Fast copy failed (${ffErr.message.substring(0, 100)}). Trying with ultrafast transcode...`);
+      console.warn(`[Twitch Live Chunk] Fast copy failed (${ffErr.message.substring(0, 100)}). Trying with ultrafast transcode for ${timeStr}...`);
       const transcodeCmd = `"${FFMPEG_BIN}" -y -ss ${startTime} -i "${streamUrl}" -t ${chunkDuration} -c:v libx264 -preset ultrafast -crf 26 -c:a aac -b:a 128k -movflags +faststart "${outputPath}"`;
       await execAsync(transcodeCmd, { timeout: 25000 });
     }
@@ -192,7 +204,7 @@ router.get('/live-chunk', async (req: Request, res: Response) => {
 
     const elapsed = ((Date.now() - t0) / 1000).toFixed(2);
     const stat = fs.statSync(outputPath);
-    console.log(`[Twitch Live Chunk] Chunk ready in ${elapsed}s: ${Math.round(stat.size / 1024)}KB`);
+    console.log(`[Twitch Live Chunk] Chunk @ ${timeStr} ready in ${elapsed}s: ${Math.round(stat.size / 1024)}KB`);
   })();
 
   inFlightExtractions.set(hash, extractionPromise);
