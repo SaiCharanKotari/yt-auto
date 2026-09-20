@@ -25,7 +25,6 @@ try:
         extract_twitch_live_segment,
         is_twitch_live_channel,
         prune_old_chunks,
-        format_timestamp,
     )
 except ImportError:
     from .handlers import (
@@ -33,7 +32,6 @@ except ImportError:
         extract_twitch_live_segment,
         is_twitch_live_channel,
         prune_old_chunks,
-        format_timestamp,
     )
 
 # Paths
@@ -195,18 +193,20 @@ class DaemonHTTPHandler(BaseHTTPRequestHandler):
 
     def do_HEAD(self):
         parsed = urlparse(self.path)
-        if parsed.path in ["/twitch/live-segment", "/api/twitch-live/live-chunk"]:
+        if parsed.path == "/twitch/live-segment":
             self.send_response(200)
             self.send_header("Access-Control-Allow-Origin", "*")
             self.send_header("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
             self.send_header("Access-Control-Allow-Headers", "Range, Content-Type, Accept, Authorization, X-Requested-With")
             self.send_header("Content-Type", "video/mp4")
             self.send_header("Cache-Control", "public, max-age=300")
+            self.send_header("Connection", "close")
             self.end_headers()
         elif parsed.path in ["/status", "/health", "/"]:
             self.send_response(200)
             self.send_header("Access-Control-Allow-Origin", "*")
             self.send_header("Content-Type", "application/json")
+            self.send_header("Connection", "close")
             self.end_headers()
         else:
             self.send_response(404)
@@ -222,7 +222,7 @@ class DaemonHTTPHandler(BaseHTTPRequestHandler):
         if parsed.path in ["/status", "/health", "/"]:
             resp_body = {"status": "ok", "app": "ClipFlowHelper", "version": "1.0.0", "daemon": True}
             self._send_json(200, resp_body, origin)
-        elif parsed.path in ["/twitch/live-segment", "/api/twitch-live/live-chunk"]:
+        elif parsed.path == "/twitch/live-segment":
             import urllib.parse
             query_params = urllib.parse.parse_qs(parsed.query)
             target_url = query_params.get("url", [""])[0].strip()
@@ -251,8 +251,7 @@ class DaemonHTTPHandler(BaseHTTPRequestHandler):
                 self._send_json(500, {"error": "yt-dlp or ffmpeg engine missing on local machine"}, origin)
                 return
 
-            time_str = format_timestamp(start_time)
-            print(f"[Daemon] Extracting Twitch live chunk: {target_url} @ {time_str} (t={start_time}s, dur={chunk_duration}s)")
+            print(f"[Daemon] Extracting Twitch live chunk: {target_url} @ t={start_time}s (dur={chunk_duration}s)")
             success, chunk_path, err_msg = extract_twitch_live_segment(
                 target_url,
                 start_time,
@@ -277,13 +276,13 @@ class DaemonHTTPHandler(BaseHTTPRequestHandler):
                 self.send_header("Cache-Control", "public, max-age=300")
                 self.send_header("X-Chunk-Start", str(start_time))
                 self.send_header("X-Chunk-Duration", str(chunk_duration))
+                self.send_header("Connection", "close")
                 self.end_headers()
 
                 with open(chunk_path, "rb") as f:
                     shutil.copyfileobj(f, self.wfile)
-                print(f"[Daemon SEND] Chunk @ {time_str} (t={start_time}s) delivered ({size // 1024}KB)")
             except Exception as e:
-                print(f"[Daemon Error] Streaming live chunk @ {time_str}: {e}")
+                print(f"[Daemon Error] Streaming live chunk: {e}")
         else:
             self._send_json(404, {"error": f"Endpoint '{self.path}' not found"}, origin)
 

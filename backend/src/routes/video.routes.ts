@@ -10,7 +10,7 @@ import { FrameExtractorService } from '../services/frame-extractor.service.js';
 import { YouTubeDownloaderService } from '../services/youtube/index.js';
 import { InstagramDownloaderService } from '../services/instagram/index.js';
 import { TwitterDownloaderService } from '../services/twitter/index.js';
-import { TwitchDownloaderService } from '../services/twitch/index.js';
+import { TwitchDownloaderService, TwitchLiveFrameService } from '../services/twitch/index.js';
 import crypto from 'crypto';
 import path from 'path';
 import fs from 'fs';
@@ -246,6 +246,49 @@ router.get('/frame', async (req: Request, res: Response) => {
   const timestamp = Math.max(0, parseFloat(time as string) || 0);
   const isFullRes = isDownload || fullRes === 'true' || fullRes === '1';
   const requestedFormat = ((format as string) || 'png').toLowerCase() === 'jpg' ? 'jpg' : 'png';
+  // Dedicated Twitch LIVE Channel Handler (always uses exact 5s chunks and local offsets, avoiding ads)
+  if (TwitchLiveFrameService.isLiveChannelUrl(targetUrl)) {
+    try {
+      const chunkOffset = Math.floor(timestamp / 5) * 5;
+      const localTime = +(timestamp - chunkOffset).toFixed(3);
+      const result = await TwitchLiveFrameService.extractLiveFrame({
+        url: targetUrl,
+        chunkOffset,
+        localTime,
+        globalTime: timestamp,
+        quality: (req.query.quality as string) || (req.query.res as string) || '720p',
+        format: requestedFormat,
+        crop: {
+          crop_x: crop_x as string,
+          crop_y: crop_y as string,
+          crop_w: crop_w as string,
+          crop_h: crop_h as string,
+        },
+      });
+
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+      res.setHeader('Content-Type', result.isPng ? 'image/png' : 'image/jpeg');
+      res.setHeader('Cache-Control', 'public, max-age=86400');
+      res.setHeader('X-Chunk-Offset', String(result.chunkOffset));
+      res.setHeader('X-Local-Time', String(result.localTime));
+      res.setHeader('X-Global-Time', String(result.globalTime));
+      res.setHeader('X-Chunk-Duration', String(result.chunkDuration));
+      res.setHeader('X-From-Cache', String(result.fromCache));
+
+      if (isDownload) {
+        const safeTitle = cleanUnicodeFileName((title as string) || 'twitch_live', 'frame');
+        const timeStr = `${Math.floor(timestamp / 60)}m${Math.floor(timestamp % 60)}s`;
+        res.setHeader('Content-Disposition', getSafeContentDisposition(`${safeTitle}_frame_${timeStr}.${result.ext}`));
+      }
+
+      return fs.createReadStream(result.filePath).pipe(res);
+    } catch (liveErr: any) {
+      console.error('[Twitch Live Frame Error in /frame]', liveErr.message);
+      return res.status(500).json({ error: `Failed to extract live frame: ${liveErr.message}` });
+    }
+  }
+
   const activeStreamUrl = (streamUrl as string) || (directUrl as string);
 
   try {

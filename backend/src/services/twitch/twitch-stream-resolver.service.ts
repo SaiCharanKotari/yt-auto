@@ -51,11 +51,20 @@ export class TwitchStreamResolverService {
       if (!gqlRes.ok) return null;
 
       const gqlData = await gqlRes.json();
-      const edges = gqlData?.data?.user?.videos?.edges || [];
-      const recordingVod = edges.find((e: any) => {
-        const n = e?.node;
-        return n && (n.status === 'RECORDING' || n.broadcastType === 'ARCHIVE');
-      })?.node;
+      const userObj = gqlData?.data?.user;
+      const streamObj = userObj?.stream;
+      const edges = userObj?.videos?.edges || [];
+
+      // 1. Explicit RECORDING status is the active DVR VOD of the live stream
+      let recordingVod = edges.find((e: any) => e?.node?.status === 'RECORDING')?.node;
+
+      // 2. If broadcaster's stream is active and the latest video is an ARCHIVE broadcast
+      if (!recordingVod && streamObj?.id && edges.length > 0) {
+        const topNode = edges[0]?.node;
+        if (topNode?.broadcastType === 'ARCHIVE') {
+          recordingVod = topNode;
+        }
+      }
 
       if (recordingVod?.id) {
         return String(recordingVod.id);
@@ -84,8 +93,9 @@ export class TwitchStreamResolverService {
       }
     }
 
-    const channelMatch = targetUrl.match(/twitch\.tv\/([a-zA-Z0-9_]+)(?:\/)?$/i);
-    const isChannel = Boolean(channelMatch && channelMatch[1] && !['videos', 'clip', 'directory', 'p'].includes(channelMatch[1].toLowerCase()));
+    const cleanUrl = targetUrl.split('?')[0].replace(/\/$/, '');
+    const channelMatch = cleanUrl.match(/twitch\.tv\/([a-zA-Z0-9_]+)$/i);
+    const isChannel = Boolean(channelMatch && channelMatch[1] && !['videos', 'clip', 'directory', 'p', 'settings'].includes(channelMatch[1].toLowerCase()));
     const channel = isChannel ? channelMatch![1].toLowerCase() : undefined;
 
     let targetResolveUrl = targetUrl;

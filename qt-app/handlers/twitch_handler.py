@@ -27,17 +27,6 @@ _IN_FLIGHT_LOCK = threading.Lock()
 _EXTRACTION_SEMAPHORE = threading.BoundedSemaphore(value=3)
 
 
-def format_timestamp(seconds: int) -> str:
-    """Format seconds into HH:MM:SS or MM:SS human-readable time."""
-    s = max(0, int(seconds))
-    hrs = s // 3600
-    mins = (s % 3600) // 60
-    secs = s % 60
-    if hrs > 0:
-        return f"{hrs:02d}:{mins:02d}:{secs:02d}"
-    return f"{mins:02d}:{secs:02d}"
-
-
 def is_twitch_url(url: str) -> bool:
     if not url:
         return False
@@ -261,11 +250,9 @@ def extract_twitch_live_segment(
     chunk_hash = hashlib.md5(f"{url.strip()}-{start_time}-{chunk_duration}".encode("utf-8")).hexdigest()
     output_path = chunks_dir / f"chunk_{chunk_hash}.mp4"
 
-    time_str = format_timestamp(start_time)
-
     # 1. Instant Disk Cache Hit
     if output_path.exists() and output_path.stat().st_size > 1000:
-        print(f"[Twitch Live Chunk] Instant local cache hit @ {time_str} (t={start_time}s, {round(output_path.stat().st_size / 1024)}KB)")
+        print(f"[Twitch Live Chunk] Instant local cache hit @ t={start_time}s ({round(output_path.stat().st_size / 1024)}KB)")
         return True, str(output_path), None
 
     # 2. In-flight Request Deduplication
@@ -279,7 +266,7 @@ def extract_twitch_live_segment(
             is_initiator = True
 
     if not is_initiator:
-        print(f"[Twitch Live Chunk] Joining existing in-flight extraction @ {time_str} (t={start_time}s)")
+        print(f"[Twitch Live Chunk] Joining existing in-flight extraction @ t={start_time}s")
         event.wait(timeout=30)
         with _IN_FLIGHT_LOCK:
             res = _IN_FLIGHT_RESULTS.get(chunk_hash)
@@ -292,61 +279,86 @@ def extract_twitch_live_segment(
         # Resolve stream URL (with 10-minute cache)
         stream_url, source_type = resolve_stream_url(url, yt_bin, quality="720p")
 
-        print(f"[Twitch Live Chunk] Extracting {chunk_duration}s at {time_str} (t={start_time}s, {source_type} mode)...")
+        print(f"[Twitch Live Chunk] Extracting {chunk_duration}s at t={start_time}s ({source_type} mode)...")
 
-        # 1. First attempt fast stream copy (-c copy) exactly like backend
+        # Fast stream copy first with 6s timeout
         ff_cmd = [
             ffmpeg_bin,
             "-y",
+            "-reconnect", "1",
+            "-reconnect_at_eof", "1",
+            "-reconnect_streamed", "1",
+            "-reconnect_delay_max", "2",
+            "-analyzeduration", "1000000",
+            "-probesize", "1000000",
             "-ss", str(start_time),
             "-i", stream_url,
             "-t", str(chunk_duration),
-            "-c", "copy",
+            "-map", "0:v:0",
+            "-map", "0:a:0?",
+            "-c:v", "copy",
+            "-c:a", "copy",
+            "-avoid_negative_ts", "make_zero",
+            "-fflags", "+genpts+discardcorrupt",
             "-movflags", "+faststart",
-            "-bsf:a", "aac_adtstoasc",
             str(output_path)
         ]
 
         copy_success = False
         with _EXTRACTION_SEMAPHORE:
             try:
-                proc = subprocess.run(ff_cmd, capture_output=True, text=True, errors="replace", creationflags=flags, timeout=20)
+                proc = subprocess.run(ff_cmd, capture_output=True, text=True, errors="replace", creationflags=flags, timeout=6)
                 if proc.returncode == 0 and output_path.exists() and output_path.stat().st_size > 1000:
                     copy_success = True
             except subprocess.TimeoutExpired:
                 pass
 
-            # 2. Fallback to ultrafast transcode if copy failed or produced no output
+            # Fallback to ultrafast transcode if copy failed or timed out
             if not copy_success:
-                print(f"[Twitch Live Chunk] Fast copy failed. Trying with ultrafast transcode for {time_str} (t={start_time}s)...")
+                print(f"[Twitch Live Chunk] Executing ultrafast transcode for t={start_time}s...")
                 transcode_cmd = [
                     ffmpeg_bin,
                     "-y",
+                    "-reconnect", "1",
+                    "-reconnect_at_eof", "1",
+                    "-reconnect_streamed", "1",
+                    "-reconnect_delay_max", "2",
+                    "-analyzeduration", "1000000",
+                    "-probesize", "1000000",
                     "-ss", str(start_time),
                     "-i", stream_url,
                     "-t", str(chunk_duration),
+                    "-map", "0:v:0",
+                    "-map", "0:a:0?",
                     "-c:v", "libx264",
                     "-preset", "ultrafast",
+                    "-tune", "zerolatency",
+                    "-threads", "4",
                     "-crf", "26",
                     "-c:a", "aac",
                     "-b:a", "128k",
                     "-movflags", "+faststart",
                     str(output_path)
                 ]
-                proc = subprocess.run(transcode_cmd, capture_output=True, text=True, errors="replace", creationflags=flags, timeout=25)
+                proc = subprocess.run(transcode_cmd, capture_output=True, text=True, errors="replace", creationflags=flags, timeout=18)
 
         if not output_path.exists() or output_path.stat().st_size == 0:
-            # Stale stream URL fallback: invalidate cache and try once more with fresh URL
-            print(f"[Twitch Live Chunk] Retrying with fresh stream URL for {time_str} (t={start_time}s)...")
+            # Stale stream URL fallback: invalidate cache and try once more
+            print(f"[Twitch Live Chunk] Retrying with fresh stream URL for t={start_time}s...")
             fresh_url, _ = resolve_stream_url(url, yt_bin, quality="720p", force_refresh=True)
             retry_cmd = [
                 ffmpeg_bin,
                 "-y",
+                "-reconnect", "1",
+                "-reconnect_at_eof", "1",
+                "-reconnect_streamed", "1",
+                "-reconnect_delay_max", "2",
                 "-ss", str(start_time),
                 "-i", fresh_url,
                 "-t", str(chunk_duration),
                 "-c:v", "libx264",
                 "-preset", "ultrafast",
+                "-tune", "zerolatency",
                 "-crf", "26",
                 "-c:a", "aac",
                 "-b:a", "128k",
@@ -354,14 +366,14 @@ def extract_twitch_live_segment(
                 str(output_path)
             ]
             with _EXTRACTION_SEMAPHORE:
-                subprocess.run(retry_cmd, capture_output=True, text=True, errors="replace", creationflags=flags, timeout=25)
+                subprocess.run(retry_cmd, capture_output=True, text=True, errors="replace", creationflags=flags, timeout=18)
 
         if not output_path.exists() or output_path.stat().st_size == 0:
             raise RuntimeError("FFmpeg produced no output. Stream may be unavailable at this timestamp.")
 
         elapsed = round(time.time() - t0, 2)
         size_kb = round(output_path.stat().st_size / 1024)
-        print(f"[Twitch Live Chunk] Chunk @ {time_str} ready in {elapsed}s: {size_kb}KB -> {output_path.name}")
+        print(f"[Twitch Live Chunk] Local chunk ready in {elapsed}s: {size_kb}KB -> {output_path.name}")
 
         result = (True, str(output_path), None)
         with _IN_FLIGHT_LOCK:

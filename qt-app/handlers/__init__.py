@@ -30,7 +30,6 @@ from .twitch_handler import (
     build_twitch_download_args,
     extract_twitch_live_segment,
     prune_old_chunks,
-    format_timestamp,
 )
 
 def build_universal_metadata_args(url: str, ffmpeg_dir: Optional[str] = None) -> List[str]:

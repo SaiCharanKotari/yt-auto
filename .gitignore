@@ -90,6 +90,9 @@ backend/public/downloads/*
 *.webm
 *.mkv
 *.ts
+!backend/src/**/*.ts
+!frontend/src/**/*.ts
+!frontend/src/**/*.tsx
 
 # --- Binaries, Toolchains, & Installers ---
 *.exe
