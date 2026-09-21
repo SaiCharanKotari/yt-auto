@@ -446,6 +446,18 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, initialMo
               </button>
             </p>
           )}
+
+          <p className="text-[11px] text-zinc-500 text-center mt-3 pt-3 border-t border-white/[0.06]">
+            By continuing, you agree to ClipFlow's{' '}
+            <a
+              href="/terms"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-zinc-400 hover:text-purple-300 underline transition-colors"
+            >
+              Terms of Service
+            </a>.
+          </p>
         </div>
       </motion.div>
     </div>

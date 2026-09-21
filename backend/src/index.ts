@@ -13,6 +13,7 @@ import videosRoutes from './routes/videos.routes.js';
 import driveRoutes from './routes/drive.routes.js';
 import twitchRoutes from './routes/twitch.routes.js';
 import twitchLiveChannelRoutes from './routes/twitch-live-channel.routes.js';
+import appRequestRoutes from './routes/app-request.routes.js';
 import path from 'path';
 import fs from 'fs';
 
@@ -105,6 +106,8 @@ app.use('/api/video', videoRoutes);
 app.use('/api/drive', driveRoutes);
 app.use('/api/twitch', twitchRoutes);
 app.use('/api/twitch-live', twitchLiveChannelRoutes); // Live channel chunk preview (no CDN)
+app.use('/api/app-requests', appRequestRoutes);
+app.use('/api/waitlist', appRequestRoutes);
 
 // Desktop Companion OTA Auto-Update Check Endpoint
 app.get(['/api/app/update-check', '/api/app/version'], (req: Request, res: Response) => {

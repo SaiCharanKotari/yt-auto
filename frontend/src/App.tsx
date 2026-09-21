@@ -9,6 +9,8 @@ import CloudStoragePage from './pages/CloudStoragePage';
 import VerifyEmailPage from './pages/VerifyEmailPage';
 import ResetPasswordPage from './pages/ResetPasswordPage';
 import SettingsPage from './pages/SettingsPage';
+import TermsOfServicePage from './pages/TermsOfServicePage';
+import UpgradePage from './pages/UpgradePage';
 
 function App() {
   return (
@@ -19,6 +21,15 @@ function App() {
             {/* Main Hub: Landing page */}
             <Route path="/" element={<ClipFlowHome />} />
             <Route path="/dashboard" element={<ClipFlowHome />} />
+
+            {/* Pricing / Upgrade */}
+            <Route path="/upgrade" element={<UpgradePage />} />
+            <Route path="/pricing" element={<UpgradePage />} />
+            <Route path="/plans" element={<UpgradePage />} />
+
+            {/* Legal / Terms of Service */}
+            <Route path="/terms" element={<TermsOfServicePage />} />
+            <Route path="/terms-of-service" element={<TermsOfServicePage />} />
 
             {/* Authentication Routes */}
             <Route path="/login" element={<LoginPage />} />

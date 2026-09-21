@@ -1,15 +1,16 @@
-import { useState, useEffect } from 'react';
+import React, { useState, useEffect } from 'react';
+import { Link } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
-  Scissors, Globe, Users, TrendingUp,
-  Play, Download, ArrowRight, Star,
-  Sparkles, Film, Music, Share2, X,
-  Laugh, Plane, Check, Cpu, HardDrive,
-  Video, Plug
+  Scissors, Globe, Users,
+  Download, ArrowRight, Star,
+  Share2, X,
+  Check, Cpu, HardDrive
 } from 'lucide-react';
 import { AuthModal } from '../components/AuthModal';
 import { UserProfileMenu } from '../components/UserProfileMenu';
-import { ClipDownloadModal } from '../components/ClipDownloadModal';
+// import { ClipDownloadModal } from '../components/ClipDownloadModal';
+import { setStoredProcessingMode } from '../utils/editorSession';
 
 // Use real server URL from env if deployed, otherwise fallback to localhost for dev
 const BACKEND_URL = (import.meta.env.VITE_BACKEND_URL as string) ||
@@ -58,50 +59,7 @@ const STATS = [
   { value: '6', label: 'Platforms', icon: Share2 },
 ];
 
-const USE_CASES = [
-  {
-    icon: Film,
-    title: 'Content Creators',
-    desc: 'Clip your best YouTube moments and convert them into Shorts, Reels, and TikToks — all in seconds.',
-    accent: 'bg-[#0e0e14] border-white/10',
-    iconColor: 'text-purple-400',
-  },
-  {
-    icon: TrendingUp,
-    title: 'Marketing Teams',
-    desc: 'Extract brand highlights, campaign clips, and testimonials from long-form video content at scale.',
-    accent: 'bg-[#0e0e14] border-white/10',
-    iconColor: 'text-blue-400',
-  },
-  {
-    icon: Music,
-    title: 'Podcasters & Audio',
-    desc: 'Export crisp MP3 audio from any video. Perfect for podcast clips, music snippets, and voice notes.',
-    accent: 'bg-[#0e0e14] border-white/10',
-    iconColor: 'text-pink-400',
-  },
-  {
-    icon: Laugh,
-    title: 'Meme Channels & Creators',
-    desc: 'Clip popular funny videos, viral punchlines, and trending moments to fuel and scale your social media pages on autopilot.',
-    accent: 'bg-[#0e0e14] border-white/10',
-    iconColor: 'text-amber-400',
-  },
-  {
-    icon: Plane,
-    title: 'Travelers & Mobile Creators',
-    desc: 'Cut long travel videos at any specific timestamp directly on the website for free in seconds — ready to post as your Stories, Reels, and Shorts.',
-    accent: 'bg-[#0e0e14] border-white/10',
-    iconColor: 'text-emerald-400',
-  },
-  {
-    icon: Sparkles,
-    title: 'Brand Builders',
-    desc: 'Repurpose interview clips, launch videos, and testimonials into platform-ready social media content.',
-    accent: 'bg-[#0e0e14] border-white/10',
-    iconColor: 'text-violet-400',
-  },
-];
+
 
 export default function ClipFlowHome() {
   const [urlInput, setUrlInput] = useState('');
@@ -109,25 +67,78 @@ export default function ClipFlowHome() {
   const [quickTwitchUrl, setQuickTwitchUrl] = useState('');
   const [quickTwitterUrl, setQuickTwitterUrl] = useState('');
   const [showAuthModal, setShowAuthModal] = useState(false);
-  const [isVideoModalOpen, setIsVideoModalOpen] = useState(false);
-  const [isClipModalOpen, setIsClipModalOpen] = useState(false);
-  const [selectedClipUrl, setSelectedClipUrl] = useState('');
+  // const [isVideoModalOpen, setIsVideoModalOpen] = useState(false);
+  const [previewImage, setPreviewImage] = useState<string | null>(null);
+  // const [isClipModalOpen, setIsClipModalOpen] = useState(false);
+  // const [selectedClipUrl, setSelectedClipUrl] = useState('');
 
-  // Close video modal on Escape key
+  // Desktop App email request state
+  const [showEngineEmailBox, setShowEngineEmailBox] = useState(false);
+  const [appEmail, setAppEmail] = useState('');
+  const [appEmailStatus, setAppEmailStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
+  const [appEmailMsg, setAppEmailMsg] = useState('');
+
+  const handleAppEmailSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!appEmail.trim() || !appEmail.includes('@')) {
+      setAppEmailStatus('error');
+      setAppEmailMsg('Please enter a valid email address.');
+      return;
+    }
+
+    try {
+      setAppEmailStatus('loading');
+      setAppEmailMsg('');
+      const res = await fetch(`${BACKEND_URL}/api/app-requests`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: appEmail.trim() }),
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setAppEmailStatus('success');
+        setAppEmailMsg('Thank you! Your email has been recorded for Desktop App access.');
+        setAppEmail('');
+      } else {
+        setAppEmailStatus('error');
+        setAppEmailMsg(data.error || 'Failed to submit email. Please try again.');
+      }
+    } catch {
+      setAppEmailStatus('error');
+      setAppEmailMsg('Network error. Please try again later.');
+    }
+  };
+
+  // Close modals on Escape key
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setIsVideoModalOpen(false);
+      if (e.key === 'Escape') {
+        // setIsVideoModalOpen(false);
+        setPreviewImage(null);
+      }
     };
-    if (isVideoModalOpen) {
+    if (previewImage) {
       window.addEventListener('keydown', handleKeyDown);
     }
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isVideoModalOpen]);
+  }, [previewImage]);
 
   const handleClipClick = (videoUrl: string) => {
     if (!videoUrl.trim()) return;
+
+    // Desktop Helper App is currently on hold: take user directly to Pro mode
+    setStoredProcessingMode('pro');
+    window.open(
+      `/editor/studio?url=${encodeURIComponent(videoUrl.trim())}&mode=pro&engine=server`,
+      '_blank',
+      'noopener,noreferrer'
+    );
+
+    /* 
+    // ON HOLD: Previously opened Free vs Pro selection modal
     setSelectedClipUrl(videoUrl.trim());
     setIsClipModalOpen(true);
+    */
   };
 
   const handleUrlSubmit = (e: React.FormEvent) => {
@@ -136,7 +147,7 @@ export default function ClipFlowHome() {
   };
 
   return (
-    <div className="min-h-screen bg-black text-[#f8fafc] flex flex-col selection:bg-purple-500/30">
+    <div className="min-h-screen bg-black text-[#f8fafc] flex flex-col selection:bg-blue-500/30">
 
       {/* ── Header ──────────────────────────────────────────────────────── */}
       <header className="sticky top-0 z-50 border-b border-white/[0.06] bg-black/95 backdrop-blur-xl px-6 py-3">
@@ -149,28 +160,41 @@ export default function ClipFlowHome() {
           </div>
 
           {/* Nav */}
-          <nav className="hidden md:flex items-center gap-0.5">
-            {['How to use', 'Why Download Engine', 'Terms & Conditions'].map((t) => (
-              <button key={t} className="px-3 py-1.5 text-xs text-gray-400 hover:text-white hover:bg-white/5 rounded-lg transition-colors">
-                {t}
-              </button>
-            ))}
+          <nav className="hidden md:flex items-center gap-1">
+            <button
+              onClick={() => {
+                const el = document.getElementById('how-to-use');
+                if (el) el.scrollIntoView({ behavior: 'smooth' });
+              }}
+              className="px-3 py-1.5 text-xs text-gray-400 hover:text-white hover:bg-white/5 rounded-lg transition-colors cursor-pointer"
+            >
+              How to use
+            </button>
+            <button
+              onClick={() => {
+                const el = document.getElementById('why-engine');
+                if (el) el.scrollIntoView({ behavior: 'smooth' });
+              }}
+              className="px-3 py-1.5 text-xs text-gray-400 hover:text-white hover:bg-white/5 rounded-lg transition-colors cursor-pointer"
+            >
+              Download Engine
+            </button>
+            <Link
+              to="/upgrade"
+              className="px-3 py-1.5 text-xs text-gray-400 hover:text-white hover:bg-white/5 rounded-lg transition-colors cursor-pointer"
+            >
+              Upgrade
+            </Link>
+            <Link
+              to="/terms"
+              className="px-3 py-1.5 text-xs text-gray-400 hover:text-white hover:bg-white/5 rounded-lg transition-colors cursor-pointer"
+            >
+              Terms & Conditions
+            </Link>
           </nav>
 
           {/* Right actions */}
           <div className="flex items-center gap-2.5 shrink-0">
-            {/* Download Engine Button (Positioned left of profile) */}
-            <a
-              href={`${BACKEND_URL}/api/video/tools/download-dlp`}
-              download
-              className="flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-white rounded-xl transition-all hover:opacity-90 shrink-0 shadow-md shadow-purple-600/20"
-              style={{ background: 'linear-gradient(135deg, #7c3aed, #4f46e5)' }}
-              title="Download ClipFlow Processing Engine"
-            >
-              <Download className="w-3.5 h-3.5" />
-              <span>Download Engine</span>
-            </a>
-
             <UserProfileMenu onOpenAuth={() => setShowAuthModal(true)} />
           </div>
         </div>
@@ -182,7 +206,7 @@ export default function ClipFlowHome() {
         <section className="relative overflow-hidden pt-20 pb-16 px-6 bg-black">
           {/* Background glow */}
           <div className="absolute inset-0 pointer-events-none">
-            <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[600px] h-[400px] bg-gradient-radial from-purple-600/15 via-indigo-600/8 to-transparent rounded-full blur-3xl" />
+            <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[600px] h-[400px] bg-gradient-radial from-blue-600/15 via-sky-600/8 to-transparent rounded-full blur-3xl" />
           </div>
 
           <div className="max-w-4xl mx-auto text-center space-y-8 relative">
@@ -198,7 +222,7 @@ export default function ClipFlowHome() {
               </div>
               <h1 className="text-4xl sm:text-5xl lg:text-6xl font-extrabold tracking-tight text-white leading-tight">
                 Clip, Convert &{' '}
-                <span className="bg-clip-text text-transparent bg-gradient-to-r from-purple-400 via-fuchsia-400 to-indigo-400">
+                <span className="bg-clip-text text-transparent bg-gradient-to-r from-sky-400 via-blue-400 to-cyan-400">
                   Create
                 </span>
               </h1>
@@ -340,11 +364,191 @@ export default function ClipFlowHome() {
           </div>
         </section>
 
-        {/* ── Section 2: How to Use (Clean, Animated Glowing Neon Serpentine Pipeline) ── */}
-        <section className="pt-10 pb-20 px-4 sm:px-6 bg-black relative overflow-hidden">
-          <div className="max-w-[1360px] mx-auto space-y-12 relative z-10">
+        {/* ── Section 2: How to Use (4 Steps: Top to Bottom with Edge-Blurred Images Blending into Black) ── */}
+        <section id="how-to-use" className="pt-6 pb-12 px-4 sm:px-6 bg-black relative overflow-hidden scroll-mt-16">
+          <div className="max-w-5xl mx-auto space-y-6 relative z-10">
 
             {/* Header */}
+            <div className="text-center space-y-2">
+              <h2 className="text-3xl sm:text-4xl font-extrabold text-white tracking-tight">
+                How to Use ClipFlow
+              </h2>
+              <p className="text-zinc-400 text-xs sm:text-sm max-w-lg mx-auto leading-relaxed">
+                4 streamlined steps from online video URL to finished export.
+              </p>
+            </div>
+
+            {/* 4 Steps Stack with Divider Lines */}
+            <div className="divide-y divide-zinc-800/80 border-y border-zinc-800/80">
+
+              {/* ── STEP 1 ── */}
+              <div className="py-4 sm:py-5 flex flex-col md:flex-row items-center gap-6 lg:gap-10">
+                {/* Left: Uniform Image with Feathered Edge Blur Blending into Black */}
+                <div
+                  onClick={() => setPreviewImage('/steps/step1.png')}
+                  className="w-full md:w-[440px] lg:w-[460px] h-[200px] sm:h-[220px] shrink-0 relative flex items-center justify-center cursor-pointer group select-none bg-black overflow-hidden rounded-xl"
+                  title="Click to view full image"
+                >
+                  <img
+                    src="/steps/step1.png"
+                    alt="Step 1: Paste Link and Clip"
+                    style={{
+                      maskImage: 'radial-gradient(ellipse 92% 86% at 50% 50%, black 50%, transparent 100%)',
+                      WebkitMaskImage: 'radial-gradient(ellipse 92% 86% at 50% 50%, black 50%, transparent 100%)',
+                    }}
+                    className="w-full h-full object-cover object-center transition-transform duration-300 group-hover:scale-[1.03]"
+                  />
+                </div>
+
+                {/* Right: Matter */}
+                <div className="flex-1 space-y-2.5 text-left">
+                  <div className="flex items-center gap-3">
+                    <span className="text-xs font-mono font-bold text-zinc-400 tracking-wider">01</span>
+                    <div className="h-[1px] w-8 bg-zinc-700" />
+                    <span className="text-xs font-semibold text-zinc-400 uppercase tracking-wider">Step One</span>
+                  </div>
+                  <h3 className="text-lg sm:text-xl font-bold text-white tracking-tight">
+                    Paste Video Link &amp; Click Clip
+                  </h3>
+                  <p className="text-zinc-400 text-xs sm:text-sm leading-relaxed">
+                    Paste any video URL from YouTube, Instagram Reels, Twitch, or Twitter / X directly into the input bar and click <strong className="text-white font-semibold">Clip</strong>. ClipFlow automatically ingests and prepares the video stream.
+                  </p>
+                </div>
+              </div>
+
+              {/* ── STEP 2 ── */}
+              <div className="py-4 sm:py-5 flex flex-col md:flex-row items-center gap-6 lg:gap-10">
+                {/* Left: Uniform Image with Feathered Edge Blur Blending into Black */}
+                <div
+                  onClick={() => setPreviewImage('/steps/step2.png')}
+                  className="w-full md:w-[440px] lg:w-[460px] h-[200px] sm:h-[220px] shrink-0 relative flex items-center justify-center cursor-pointer group select-none bg-black overflow-hidden rounded-xl"
+                  title="Click to view full image"
+                >
+                  <img
+                    src="/steps/step2.png"
+                    alt="Step 2: Precision Trimming"
+                    style={{
+                      maskImage: 'radial-gradient(ellipse 92% 86% at 50% 50%, black 50%, transparent 100%)',
+                      WebkitMaskImage: 'radial-gradient(ellipse 92% 86% at 50% 50%, black 50%, transparent 100%)',
+                    }}
+                    className="w-full h-full object-cover object-center transition-transform duration-300 group-hover:scale-[1.03]"
+                  />
+                </div>
+
+                {/* Right: Matter */}
+                <div className="flex-1 space-y-2.5 text-left">
+                  <div className="flex items-center gap-3">
+                    <span className="text-xs font-mono font-bold text-zinc-400 tracking-wider">02</span>
+                    <div className="h-[1px] w-8 bg-zinc-700" />
+                    <span className="text-xs font-semibold text-zinc-400 uppercase tracking-wider">Step Two</span>
+                  </div>
+                  <h3 className="text-lg sm:text-xl font-bold text-white tracking-tight">
+                    Set Start &amp; End Cut Points
+                  </h3>
+                  <p className="text-zinc-400 text-xs sm:text-sm leading-relaxed">
+                    Scrub through the timeline with sub-second accuracy. Drag the interactive start and end trim handles on the video filmstrip to pinpoint the exact portion you want to clip.
+                  </p>
+                </div>
+              </div>
+
+              {/* ── STEP 3 ── */}
+              <div className="py-4 sm:py-5 flex flex-col md:flex-row items-center gap-6 lg:gap-10">
+                {/* Left: Uniform Image with Feathered Edge Blur Blending into Black */}
+                <div
+                  onClick={() => setPreviewImage('/steps/step3.png')}
+                  className="w-full md:w-[440px] lg:w-[460px] h-[200px] sm:h-[220px] shrink-0 relative flex items-center justify-center cursor-pointer group select-none bg-black overflow-hidden rounded-xl"
+                  title="Click to view full image"
+                >
+                  <img
+                    src="/steps/step3.png"
+                    alt="Step 3: Crop & Framing, Format & Quality"
+                    style={{
+                      maskImage: 'radial-gradient(ellipse 92% 86% at 50% 50%, black 50%, transparent 100%)',
+                      WebkitMaskImage: 'radial-gradient(ellipse 92% 86% at 50% 50%, black 50%, transparent 100%)',
+                    }}
+                    className="w-full h-full object-cover object-center transition-transform duration-300 group-hover:scale-[1.03]"
+                  />
+                </div>
+
+                {/* Right: Matter */}
+                <div className="flex-1 space-y-2.5 text-left">
+                  <div className="flex items-center gap-3">
+                    <span className="text-xs font-mono font-bold text-zinc-400 tracking-wider">03</span>
+                    <div className="h-[1px] w-8 bg-zinc-700" />
+                    <span className="text-xs font-semibold text-zinc-400 uppercase tracking-wider">Step Three</span>
+                  </div>
+                  <h3 className="text-lg sm:text-xl font-bold text-white tracking-tight">
+                    Choose Framing, Format &amp; Resolution
+                  </h3>
+                  <p className="text-zinc-400 text-xs sm:text-sm leading-relaxed">
+                    Select your aspect ratio (16:9 Landscape, 9:16 Shorts/Reels, 1:1 Square, 4:5 Portrait, or Custom), pick your export format (MP4 Video, MP3 Audio, Subtitles), and choose resolutions up to 4K / 1080p.
+                  </p>
+                </div>
+              </div>
+
+              {/* ── STEP 4 (Two Images Stacked Vertically on Left, Same Total Size) ── */}
+              <div className="py-4 sm:py-5 flex flex-col md:flex-row items-center gap-6 lg:gap-10">
+                {/* Left: Two Images Stacked on Top of Each Other (Same Exact Container Footprint) */}
+                <div className="w-full md:w-[440px] lg:w-[460px] h-[200px] sm:h-[220px] shrink-0 relative flex flex-col justify-between gap-2.5 bg-black">
+
+                  {/* Top Image: Local Save File Dialog */}
+                  <div
+                    onClick={() => setPreviewImage('/steps/step4_save.png')}
+                    className="relative flex-1 rounded-lg overflow-hidden bg-black cursor-pointer group select-none flex items-center justify-center"
+                    title="Click to view full image"
+                  >
+                    <img
+                      src="/steps/step4_save.png"
+                      alt="Step 4: Save As Dialog"
+                      style={{
+                        maskImage: 'radial-gradient(ellipse 94% 84% at 50% 50%, black 50%, transparent 100%)',
+                        WebkitMaskImage: 'radial-gradient(ellipse 94% 84% at 50% 50%, black 50%, transparent 100%)',
+                      }}
+                      className="w-full h-full object-cover object-center transition-transform duration-300 group-hover:scale-[1.03]"
+                    />
+                  </div>
+
+                  {/* Bottom Image: Cloud Storage Vault */}
+                  <div
+                    onClick={() => setPreviewImage('/steps/step4_storage.png')}
+                    className="relative flex-1 rounded-lg overflow-hidden bg-black cursor-pointer group select-none flex items-center justify-center"
+                    title="Click to view full image"
+                  >
+                    <img
+                      src="/steps/step4_storage.png"
+                      alt="Step 4: Cloud Storage Table"
+                      style={{
+                        maskImage: 'radial-gradient(ellipse 94% 84% at 50% 50%, black 50%, transparent 100%)',
+                        WebkitMaskImage: 'radial-gradient(ellipse 94% 84% at 50% 50%, black 50%, transparent 100%)',
+                      }}
+                      className="w-full h-full object-cover object-center transition-transform duration-300 group-hover:scale-[1.03]"
+                    />
+                  </div>
+                </div>
+
+                {/* Right: Matter */}
+                <div className="flex-1 space-y-2.5 text-left">
+                  <div className="flex items-center gap-3">
+                    <span className="text-xs font-mono font-bold text-zinc-400 tracking-wider">04</span>
+                    <div className="h-[1px] w-8 bg-zinc-700" />
+                    <span className="text-xs font-semibold text-zinc-400 uppercase tracking-wider">Step Four</span>
+                  </div>
+                  <h3 className="text-lg sm:text-xl font-bold text-white tracking-tight">
+                    Instant Download &amp; Cloud Storage
+                  </h3>
+                  <p className="text-zinc-400 text-xs sm:text-sm leading-relaxed">
+                    Download your trimmed clip directly to your computer with zero compression loss, and access your saved video library anytime from your personal Cloud Storage vault.
+                  </p>
+                </div>
+              </div>
+
+            </div>
+          </div>
+        </section>
+
+        {/* ── OLD HOW TO USE UI (COMMENTED OUT AS REQUESTED) ──
+        <section id="how-to-use-old" className="pt-10 pb-20 px-4 sm:px-6 bg-black relative overflow-hidden scroll-mt-16">
+          <div className="max-w-[1360px] mx-auto space-y-12 relative z-10">
             <div className="text-center space-y-3">
               <h2 className="text-3xl sm:text-5xl font-extrabold text-white tracking-tight">
                 How to Use ClipFlow
@@ -353,308 +557,31 @@ export default function ClipFlowHome() {
                 4 streamlined stages from raw online video to finished 4K clip.
               </p>
             </div>
-
-            {/* ── DESKTOP ANIMATED SERPENTINE CANVAS (Screen >= 1200px) ── */}
-            <motion.div
-              initial="hidden"
-              whileInView="visible"
-              viewport={{ once: true, margin: "-80px" }}
-              className="hidden xl:block relative w-[1340px] h-[520px] mx-auto select-none my-4"
-            >
-
-              {/* Glowing Green Neon Cable SVG Canvas with Laser Pulse Animation */}
-              <svg
-                viewBox="0 0 1340 520"
-                className="absolute inset-0 w-full h-full pointer-events-none z-0 overflow-visible"
-                fill="none"
-                xmlns="http://www.w3.org/2000/svg"
-              >
-                <defs>
-                  {/* High Intensity Soft Glow Filter */}
-                  <filter id="laser-glow" x="-50%" y="-50%" width="200%" height="200%">
-                    <feGaussianBlur in="SourceGraphic" stdDeviation="3" result="blur1" />
-                    <feGaussianBlur in="SourceGraphic" stdDeviation="7" result="blur2" />
-                    <feMerge>
-                      <feMergeNode in="blur2" />
-                      <feMergeNode in="blur1" />
-                      <feMergeNode in="SourceGraphic" />
-                    </feMerge>
-                  </filter>
-                  <linearGradient id="laser-grad" x1="0%" y1="0%" x2="100%" y2="100%">
-                    <stop offset="0%" stopColor="#10b981" />
-                    <stop offset="50%" stopColor="#34d399" />
-                    <stop offset="100%" stopColor="#059669" />
-                  </linearGradient>
-                </defs>
-
-                {/* 1. Wire: Plug (x:53, y:108) -> Flow 01 (x:160, y:107) */}
-                <motion.path
-                  d="M 53 108 C 80 130, 120 128, 160 107"
-                  stroke="url(#laser-grad)"
-                  strokeWidth="3"
-                  strokeLinecap="round"
-                  filter="url(#laser-glow)"
-                  variants={{
-                    hidden: { pathLength: 0, opacity: 0 },
-                    visible: { pathLength: 1, opacity: 1, transition: { duration: 0.6, ease: 'easeOut', delay: 0.1 } },
-                  }}
-                />
-
-                {/* 2. Wire: Flow 01 (x:510, y:107) -> Flow 02 (x:790, y:107) - Reversed curvature (sagging down) */}
-                <motion.path
-                  d="M 510 107 C 600 155, 700 155, 790 107"
-                  stroke="url(#laser-grad)"
-                  strokeWidth="3"
-                  strokeLinecap="round"
-                  filter="url(#laser-glow)"
-                  variants={{
-                    hidden: { pathLength: 0, opacity: 0 },
-                    visible: { pathLength: 1, opacity: 1, transition: { duration: 0.7, ease: 'easeInOut', delay: 0.7 } },
-                  }}
-                />
-
-                {/* 3. Wire: Flow 02 (x:1140, y:107) -> Sweeping Right Loop -> Flow 03 (x:1140, y:397) */}
-                <motion.path
-                  d="M 1140 107 C 1275 107, 1335 185, 1325 252 C 1315 320, 1255 397, 1140 397"
-                  stroke="url(#laser-grad)"
-                  strokeWidth="3"
-                  strokeLinecap="round"
-                  filter="url(#laser-glow)"
-                  variants={{
-                    hidden: { pathLength: 0, opacity: 0 },
-                    visible: { pathLength: 1, opacity: 1, transition: { duration: 0.9, ease: 'easeInOut', delay: 1.4 } },
-                  }}
-                />
-
-                {/* 4. Wire: Flow 03 (x:790, y:397) -> Flow 04 (x:510, y:397) - Reversed curvature (arching up) */}
-                <motion.path
-                  d="M 790 397 C 700 350, 600 350, 510 397"
-                  stroke="url(#laser-grad)"
-                  strokeWidth="3"
-                  strokeLinecap="round"
-                  filter="url(#laser-glow)"
-                  variants={{
-                    hidden: { pathLength: 0, opacity: 0 },
-                    visible: { pathLength: 1, opacity: 1, transition: { duration: 0.7, ease: 'easeInOut', delay: 2.3 } },
-                  }}
-                />
-
-                {/* 5. Wire: Flow 04 (x:160, y:397) -> Video Output (x:75, y:397) */}
-                <motion.path
-                  d="M 160 397 C 125 400, 100 397, 75 397"
-                  stroke="url(#laser-grad)"
-                  strokeWidth="3"
-                  strokeLinecap="round"
-                  filter="url(#laser-glow)"
-                  variants={{
-                    hidden: { pathLength: 0, opacity: 0 },
-                    visible: { pathLength: 1, opacity: 1, transition: { duration: 0.5, ease: 'easeOut', delay: 3.0 } },
-                  }}
-                />
-              </svg>
-
-              {/* 🔌 Plug Logo Only (Pure White, Positioned on wire) */}
-              <motion.div
-                variants={{
-                  hidden: { opacity: 0, scale: 0.8 },
-                  visible: { opacity: 1, scale: 1, transition: { duration: 0.4 } },
-                }}
-                style={{ position: 'absolute', left: '10px', top: '65px', width: '60px', height: '60px' }}
-                className="flex items-center justify-center text-white z-10 select-none"
-              >
-                <Plug className="w-12 h-12 text-white -rotate-45 drop-shadow-[0_0_18px_rgba(255,255,255,0.6)]" />
-              </motion.div>
-
-              {/* Card 1: Flow 01 (Paste Any Video Link) */}
-              <motion.div
-                variants={{
-                  hidden: { opacity: 0, y: 15, scale: 0.95 },
-                  visible: { opacity: 1, y: 0, scale: 1, transition: { duration: 0.5, delay: 0.4 } },
-                }}
-                style={{
-                  position: 'absolute',
-                  left: '160px',
-                  top: '0px',
-                  width: '350px',
-                  height: '215px',
-                  transform: 'rotate(-2deg)',
-                }}
-                className="p-6 rounded-2xl bg-[#18181c] border border-zinc-700/60 hover:border-zinc-500/80 transition-all duration-300 shadow-2xl shadow-black/80 z-10 flex flex-col justify-start group"
-              >
-                <span className="text-[12px] font-mono font-bold text-emerald-400 uppercase tracking-wider">
-                  FLOW 01
-                </span>
-                <h3 className="text-lg font-bold text-white tracking-tight mt-1 mb-2">
-                  Paste Any Video Link
-                </h3>
-                <p className="text-[13px] text-zinc-300 leading-relaxed font-normal">
-                  Drop any video link from YouTube, Shorts, Instagram Reels, Twitch, TikTok, or Twitter / X. The high-speed ingestion engine analyzes and parses master streams, multi-bitrate codecs, audio tracks, and chapter metadata automatically.
-                </p>
-              </motion.div>
-
-              {/* Card 2: Flow 02 (Precision Timeline Trimming) */}
-              <motion.div
-                variants={{
-                  hidden: { opacity: 0, y: 15, scale: 0.95 },
-                  visible: { opacity: 1, y: 0, scale: 1, transition: { duration: 0.5, delay: 1.1 } },
-                }}
-                style={{
-                  position: 'absolute',
-                  left: '790px',
-                  top: '0px',
-                  width: '350px',
-                  height: '215px',
-                  transform: 'rotate(2deg)',
-                }}
-                className="p-6 rounded-2xl bg-[#18181c] border border-zinc-700/60 hover:border-zinc-500/80 transition-all duration-300 shadow-2xl shadow-black/80 z-10 flex flex-col justify-start group"
-              >
-                <span className="text-[12px] font-mono font-bold text-emerald-400 uppercase tracking-wider">
-                  FLOW 02
-                </span>
-                <h3 className="text-lg font-bold text-white tracking-tight mt-1 mb-2">
-                  Precision Trimming
-                </h3>
-                <p className="text-[13px] text-zinc-300 leading-relaxed font-normal">
-                  Scrub the video filmstrip frame-by-frame with sub-second accuracy. Set precise in and out cut points using millisecond timestamps, keyboard shortcuts, and instant seamless looping preview without re-rendering delays.
-                </p>
-              </motion.div>
-
-              {/* Card 3: Flow 03 (Reframe & Pro Tools) */}
-              <motion.div
-                variants={{
-                  hidden: { opacity: 0, y: 15, scale: 0.95 },
-                  visible: { opacity: 1, y: 0, scale: 1, transition: { duration: 0.5, delay: 1.9 } },
-                }}
-                style={{
-                  position: 'absolute',
-                  left: '790px',
-                  top: '290px',
-                  width: '350px',
-                  height: '215px',
-                  transform: 'rotate(2deg)',
-                }}
-                className="p-6 rounded-2xl bg-[#18181c] border border-zinc-700/60 hover:border-zinc-500/80 transition-all duration-300 shadow-2xl shadow-black/80 z-10 flex flex-col justify-start group"
-              >
-                <span className="text-[12px] font-mono font-bold text-emerald-400 uppercase tracking-wider">
-                  FLOW 03
-                </span>
-                <h3 className="text-lg font-bold text-white tracking-tight mt-1 mb-2">
-                  Reframe & Pro Tools
-                </h3>
-                <p className="text-[13px] text-zinc-300 leading-relaxed font-normal">
-                  Transform video aspect ratios to 9:16 vertical Shorts/Reels, 1:1 square, or 4:5 portrait with AI-powered focus tracking. Extract studio-grade 320kbps MP3 audio, add dynamic captions, and tweak playback velocity.
-                </p>
-              </motion.div>
-
-              {/* Card 4: Flow 04 (Instant 4K Export) */}
-              <motion.div
-                variants={{
-                  hidden: { opacity: 0, y: 15, scale: 0.95 },
-                  visible: { opacity: 1, y: 0, scale: 1, transition: { duration: 0.5, delay: 2.7 } },
-                }}
-                style={{
-                  position: 'absolute',
-                  left: '160px',
-                  top: '290px',
-                  width: '350px',
-                  height: '215px',
-                  transform: 'rotate(-2deg)',
-                }}
-                className="p-6 rounded-2xl bg-[#18181c] border border-zinc-700/60 hover:border-zinc-500/80 transition-all duration-300 shadow-2xl shadow-black/80 z-10 flex flex-col justify-start group"
-              >
-                <span className="text-[12px] font-mono font-bold text-emerald-400 uppercase tracking-wider">
-                  FLOW 04
-                </span>
-                <h3 className="text-lg font-bold text-white tracking-tight mt-1 mb-2">
-                  Instant 4K Export
-                </h3>
-                <p className="text-[13px] text-zinc-300 leading-relaxed font-normal">
-                  Generate production-ready video clips up to 4K 60FPS using hardware GPU acceleration or cloud rendering. Download directly to your local storage or stream securely with zero compression loss.
-                </p>
-              </motion.div>
-
-              {/* 🎥 Video Output Logo Only (Turned 180°, Lights up at end) */}
-              <motion.div
-                variants={{
-                  hidden: { opacity: 0, scale: 0.8 },
-                  visible: { opacity: 1, scale: 1, transition: { duration: 0.5, delay: 3.3 } },
-                }}
-                style={{
-                  position: 'absolute',
-                  left: '15px',
-                  top: '367px',
-                  width: '60px',
-                  height: '60px',
-                }}
-                className="flex items-center justify-center text-white z-10 select-none"
-              >
-                <Video className="w-12 h-12 text-white scale-x-[-1] drop-shadow-[0_0_18px_rgba(255,255,255,0.6)]" />
-              </motion.div>
-
-            </motion.div>
-
-            {/* ── MOBILE / TABLET VIEW: Responsive Flow Stack (Screens < 1280px) ── */}
-            <div className="xl:hidden space-y-6">
-              {/* Plug Source */}
-              <div className="flex items-center justify-center text-white">
-                <Plug className="w-10 h-10 text-white -rotate-45 drop-shadow-[0_0_12px_rgba(255,255,255,0.4)]" />
-              </div>
-
-              {/* Flow Cards */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                {[
-                  {
-                    tag: 'FLOW 01',
-                    title: 'Paste Any Video Link',
-                    desc: 'Drop any video link from YouTube, Shorts, Instagram Reels, Twitch, TikTok, or Twitter / X. The high-speed ingestion engine analyzes and parses master streams, multi-bitrate codecs, audio tracks, and chapter metadata automatically.',
-                  },
-                  {
-                    tag: 'FLOW 02',
-                    title: 'Precision Trimming',
-                    desc: 'Scrub the video filmstrip frame-by-frame with sub-second accuracy. Set precise in and out cut points using millisecond timestamps, keyboard shortcuts, and instant seamless looping preview without re-rendering delays.',
-                  },
-                  {
-                    tag: 'FLOW 03',
-                    title: 'Reframe & Pro Tools',
-                    desc: 'Transform video aspect ratios to 9:16 vertical Shorts/Reels, 1:1 square, or 4:5 portrait with AI-powered focus tracking. Extract studio-grade 320kbps MP3 audio, add dynamic captions, and tweak playback velocity.',
-                  },
-                  {
-                    tag: 'FLOW 04',
-                    title: 'Instant 4K Export',
-                    desc: 'Generate production-ready video clips up to 4K 60FPS using hardware GPU acceleration or cloud rendering. Download directly to your local storage or stream securely with zero compression loss.',
-                  },
-                ].map((item) => (
-                  <div
-                    key={item.tag}
-                    className="p-6 rounded-2xl bg-[#18181c] border border-zinc-700/60 shadow-xl flex flex-col justify-start"
-                  >
-                    <span className="text-[12px] font-mono font-bold text-emerald-400 uppercase tracking-wider">
-                      {item.tag}
-                    </span>
-                    <h3 className="text-base font-bold text-white tracking-tight mt-1 mb-2">{item.title}</h3>
-                    <p className="text-xs text-zinc-300 leading-relaxed font-normal">{item.desc}</p>
-                  </div>
-                ))}
-              </div>
-
-              {/* Video Output Logo Only */}
-              <div className="flex items-center justify-center text-white">
-                <Video className="w-10 h-10 text-white scale-x-[-1] drop-shadow-[0_0_12px_rgba(255,255,255,0.4)]" />
-              </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              {[
+                { tag: 'FLOW 01', title: 'Paste Any Video Link', desc: 'Drop any video link from YouTube, Shorts, Instagram Reels, Twitch, TikTok, or Twitter / X.' },
+                { tag: 'FLOW 02', title: 'Precision Trimming', desc: 'Scrub the video filmstrip frame-by-frame with sub-second accuracy.' },
+                { tag: 'FLOW 03', title: 'Reframe & Pro Tools', desc: 'Transform video aspect ratios to 9:16 vertical Shorts/Reels, 1:1 square, or 4:5 portrait.' },
+                { tag: 'FLOW 04', title: 'Instant 4K Export', desc: 'Generate production-ready video clips up to 4K 60FPS using hardware GPU acceleration or cloud rendering.' },
+              ].map((item) => (
+                <div key={item.tag} className="p-6 rounded-2xl bg-[#18181c] border border-zinc-700/60 shadow-xl flex flex-col justify-start">
+                  <span className="text-[12px] font-mono font-bold text-emerald-400 uppercase tracking-wider">{item.tag}</span>
+                  <h3 className="text-base font-bold text-white tracking-tight mt-1 mb-2">{item.title}</h3>
+                  <p className="text-xs text-zinc-300 leading-relaxed font-normal">{item.desc}</p>
+                </div>
+              ))}
             </div>
           </div>
         </section>
+        ── END OF OLD HOW TO USE UI ── */}
 
-        {/* ── Section 3: Large Video Frame Showcase (Click to Open Pop-up) ── */}
+        {/* ── Section 3: Large Video Frame Showcase (COMMENTED OUT FOR NOW) ──
         <section className="pt-2 pb-16 sm:pb-24 px-4 sm:px-6 relative overflow-hidden bg-black">
           <div className="max-w-5xl mx-auto relative z-10">
-
-            {/* Video Thumbnail Frame Container (Clickable macOS App Mockup) */}
             <div
               onClick={() => setIsVideoModalOpen(true)}
               className="relative rounded-2xl sm:rounded-3xl bg-[#08080c] border border-white/10 shadow-2xl shadow-purple-950/20 cursor-pointer group hover:border-white/20 transition-all duration-300 select-none overflow-hidden"
             >
-              {/* macOS Top Bar with 3 Colored Dots */}
               <div className="flex items-center justify-between px-4 py-3 border-b border-white/[0.08] bg-[#0b0b10]/90">
                 <div className="flex items-center gap-2">
                   <span className="w-3 h-3 rounded-full bg-[#ef4444] border border-[#dc2626]" />
@@ -667,9 +594,7 @@ export default function ClipFlowHome() {
                 </div>
               </div>
 
-              {/* Inside Mock Dashboard Screen */}
               <div className="relative w-full aspect-[16/9.5] sm:aspect-[16/9] bg-[#050508] p-4 sm:p-8 flex flex-col justify-between">
-                {/* Visual Backdrop with Grid / Interface Cards */}
                 <div className="grid grid-cols-3 gap-4 opacity-40">
                   <div className="space-y-2">
                     <div className="h-4 w-28 bg-zinc-800/80 rounded" />
@@ -685,56 +610,20 @@ export default function ClipFlowHome() {
                   </div>
                 </div>
 
-                {/* Center Glowing Play Button */}
                 <div className="absolute inset-0 flex items-center justify-center z-20 pointer-events-none">
                   <div className="w-16 h-16 sm:w-20 sm:h-20 rounded-full bg-black/80 border border-white/30 backdrop-blur-md flex items-center justify-center text-white shadow-2xl shadow-purple-600/30 transform group-hover:scale-110 group-hover:border-white/60 transition-all duration-300">
-                    <Play className="w-7 h-7 sm:w-8 sm:h-8 ml-1 fill-white text-white" />
+                    <span className="text-white font-bold">Play</span>
                   </div>
                 </div>
 
-                {/* Bottom Frame Blend into Black */}
                 <div className="pointer-events-none absolute inset-x-0 bottom-0 h-3/5 bg-gradient-to-t from-black via-black/80 to-transparent z-10" />
               </div>
             </div>
           </div>
         </section>
+        ── */}
 
-        {/* ── Section 4: How People Use It ────────────────────────────── */}
-        <section className="py-20 px-6 bg-black">
-          <div className="max-w-6xl mx-auto space-y-12">
-            <div className="text-center space-y-3">
-              <p className="text-[11px] font-bold tracking-[0.2em] uppercase text-purple-400">Use Cases</p>
-              <h2 className="text-2xl sm:text-3xl font-bold text-white">
-                How people are using ClipFlow
-              </h2>
-              <p className="text-gray-500 text-sm max-w-xl mx-auto">
-                From solo creators to marketing teams — ClipFlow fits every workflow.
-              </p>
-            </div>
 
-            {/* Use case grid */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-              {USE_CASES.map((uc, i) => (
-                <motion.div
-                  key={uc.title}
-                  initial={{ opacity: 0, y: 16 }}
-                  whileInView={{ opacity: 1, y: 0 }}
-                  viewport={{ once: true }}
-                  transition={{ delay: i * 0.07 }}
-                  className="relative overflow-hidden rounded-2xl border border-white/[0.08] bg-[#09090e] p-6 group hover:border-white/20 transition-all duration-200 cursor-default"
-                >
-                  <div className="relative z-10 space-y-3">
-                    <div className="w-10 h-10 rounded-xl bg-black/50 border border-white/10 flex items-center justify-center">
-                      <uc.icon className={`w-5 h-5 ${uc.iconColor}`} />
-                    </div>
-                    <h3 className="font-bold text-white text-base">{uc.title}</h3>
-                    <p className="text-gray-400 text-xs leading-relaxed">{uc.desc}</p>
-                  </div>
-                </motion.div>
-              ))}
-            </div>
-          </div>
-        </section>
 
         {/* ── Section 4: Stats & Supported Platforms ── */}
         <section className="py-16 px-6 bg-black">
@@ -797,126 +686,152 @@ export default function ClipFlowHome() {
           </div>
         </section>
 
-        {/* ── Section 5: Why Download Engine ── */}
-        <section className="py-20 px-6 bg-black">
+        {/* ── Section 5: Engine Comparison & Download / Access Request ── */}
+        <section id="why-engine" className="py-20 px-6 bg-black scroll-mt-16">
           <div className="max-w-5xl mx-auto space-y-12">
             <div className="text-center space-y-3">
-              <p className="text-[11px] font-bold tracking-[0.2em] uppercase text-zinc-400">
-                Processing Architecture
-              </p>
+              <span className="text-[11px] font-mono font-bold tracking-[0.2em] uppercase text-zinc-400">
+                Desktop Performance Engine
+              </span>
               <h2 className="text-2xl sm:text-4xl font-extrabold text-white tracking-tight">
                 Why Download ClipFlow Engine?
               </h2>
-              <p className="text-zinc-400 text-sm max-w-xl mx-auto leading-relaxed">
-                Choose between using your own device's hardware power for 100% free exports or high-speed cloud infrastructure.
+              <p className="text-zinc-400 text-xs sm:text-sm max-w-2xl mx-auto leading-relaxed">
+                Both browser and desktop versions deliver incredible speed. The standalone Desktop Engine is specifically built for business holders and organizations needing lifetime unlimited capacity.
               </p>
             </div>
 
-            {/* 2 Clean Monochrome Boxes */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              {/* Box 1: With Engine */}
-              <div className="p-7 sm:p-8 rounded-3xl bg-[#09090e] border border-white/10 flex flex-col justify-between space-y-6 relative overflow-hidden group hover:border-white/25 transition-all">
-                <div className="space-y-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 max-w-4xl mx-auto">
+              {/* Box 1: With Engine (Client-Side Hardware Power - For Business Holders) */}
+              <div className="relative rounded-2xl border border-white/20 bg-[#0a0a0f] p-6 sm:p-8 flex flex-col justify-between">
+                <div className="space-y-6">
                   <div className="flex items-center justify-between">
-                    <div className="w-10 h-10 rounded-2xl bg-white/10 border border-white/15 flex items-center justify-center text-white">
-                      <Cpu className="w-5 h-5 text-white" />
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 rounded-xl bg-white/10 border border-white/15 flex items-center justify-center text-white">
+                        <Cpu className="w-5 h-5" />
+                      </div>
+                      <div>
+                        <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-zinc-400">Desktop Engine</span>
+                        <h3 className="text-lg font-bold text-white">With Desktop Engine</h3>
+                      </div>
                     </div>
-                    <span className="text-[11px] font-bold text-white bg-white/10 border border-white/20 px-3 py-1 rounded-full uppercase tracking-wider">
-                      With Engine · 100% Free
+                    <span className="px-2.5 py-1 rounded-full text-[10px] font-bold bg-white text-black border border-white">
+                      For Business Holders
                     </span>
                   </div>
 
-                  <h3 className="text-xl font-bold text-white">
-                    Client-Side Hardware Power
-                  </h3>
-
-                  <p className="text-xs sm:text-sm text-zinc-300 leading-relaxed">
-                    Since cloud servers require significant bandwidth and compute costs to transfer and re-encode high-bitrate video, we give you the freedom to choose. Use your own laptop or computer to process clips directly on your hardware.
+                  <p className="text-xs text-zinc-300 leading-relaxed">
+                    Engineered for organizations requiring maximum scale. 1-time purchase with unlimited processing power and all future updates included.
                   </p>
 
-                  <p className="text-xs text-zinc-400 leading-relaxed">
-                    Download the lightweight engine once and forget it — it connects automatically in the background with zero configuration or terminal popups needed. Enjoy unlimited 4K video exports and instant sub-second trims completely free forever.
-                  </p>
-
-                  <div className="pt-2 space-y-2 text-xs text-zinc-300">
-                    <div className="flex items-center gap-2">
-                      <Check className="w-4 h-4 text-white shrink-0" />
-                      <span>Zero cloud queue times or file size limits</span>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <Check className="w-4 h-4 text-white shrink-0" />
-                      <span>Automatic companion — no extra windows or setup required</span>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <Check className="w-4 h-4 text-white shrink-0" />
-                      <span>Saves directly into your local PC Downloads folder</span>
-                    </div>
+                  <div className="space-y-3 pt-2 border-t border-white/10">
+                    {[
+                      'No limitations — unlimited export minutes & batch clipping',
+                      'Max settings unlocked (4K 60FPS, maximum bitrate)',
+                      'All future platform changes & engine upgrades included',
+                      '1-time lifetime organization ownership with zero recurring fees',
+                      'Direct local CPU/GPU acceleration with 100% privacy & zero queues',
+                    ].map((feature, idx) => (
+                      <div key={idx} className="flex items-center gap-2.5 text-xs text-zinc-200">
+                        <div className="w-4 h-4 rounded-full bg-white/15 text-white flex items-center justify-center shrink-0">
+                          <Check className="w-2.5 h-2.5" />
+                        </div>
+                        <span>{feature}</span>
+                      </div>
+                    ))}
                   </div>
                 </div>
 
-                <div className="pt-4 border-t border-white/10">
-                  <a
-                    href={`${BACKEND_URL}/api/video/tools/download-dlp`}
-                    download
-                    className="w-full py-3 rounded-xl bg-white hover:bg-zinc-200 text-black font-bold text-xs flex items-center justify-center gap-2 transition-all shadow-md"
-                  >
-                    <Download className="w-4 h-4" />
-                    <span>Download Free Engine</span>
-                  </a>
+                {/* Bottom Action: Download Button OR Inline Email Input Box */}
+                <div className="pt-8">
+                  {showEngineEmailBox ? (
+                    <form onSubmit={handleAppEmailSubmit} className="space-y-3">
+                      <div className="flex flex-col sm:flex-row gap-2">
+                        <input
+                          type="email"
+                          required
+                          value={appEmail}
+                          onChange={(e) => setAppEmail(e.target.value)}
+                          placeholder="Enter your organization email..."
+                          className="flex-1 px-3.5 py-2.5 rounded-xl bg-black border border-white/20 text-white placeholder-zinc-500 text-xs focus:outline-none focus:border-white transition-colors"
+                        />
+                        <button
+                          type="submit"
+                          disabled={appEmailStatus === 'loading'}
+                          className="px-5 py-2.5 rounded-xl bg-white hover:bg-zinc-200 text-black font-bold text-xs transition-all shrink-0 active:scale-95 disabled:opacity-50 cursor-pointer"
+                        >
+                          {appEmailStatus === 'loading' ? 'Submitting...' : 'Submit Request'}
+                        </button>
+                      </div>
+                      {appEmailMsg && (
+                        <p className={`text-[11px] font-medium ${appEmailStatus === 'success' ? 'text-zinc-200' : 'text-red-400'}`}>
+                          {appEmailMsg}
+                        </p>
+                      )}
+                    </form>
+                  ) : (
+                    <button
+                      onClick={() => setShowEngineEmailBox(true)}
+                      className="w-full flex items-center justify-center gap-2 py-3 px-4 rounded-xl bg-white hover:bg-zinc-200 text-black font-bold text-xs transition-all active:scale-[0.99] cursor-pointer"
+                    >
+                      <Download className="w-4 h-4" />
+                      <span>Download Desktop Engine</span>
+                    </button>
+                  )}
                 </div>
               </div>
 
-              {/* Box 2: Without Engine */}
-              <div className="p-7 sm:p-8 rounded-3xl bg-[#09090e] border border-white/10 flex flex-col justify-between space-y-6 relative overflow-hidden group hover:border-white/25 transition-all">
-                <div className="space-y-4">
+              {/* Box 2: Without Engine (Cloud Processing & Storage) */}
+              <div className="relative rounded-2xl border border-white/10 bg-[#0a0a0f] p-6 sm:p-8 flex flex-col justify-between hover:border-white/20 transition-colors">
+                <div className="space-y-6">
                   <div className="flex items-center justify-between">
-                    <div className="w-10 h-10 rounded-2xl bg-white/5 border border-white/10 flex items-center justify-center text-zinc-300">
-                      <HardDrive className="w-5 h-5 text-zinc-300" />
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 rounded-xl bg-white/5 border border-white/10 flex items-center justify-center text-zinc-400">
+                        <HardDrive className="w-5 h-5" />
+                      </div>
+                      <div>
+                        <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-zinc-400">Cloud Processing</span>
+                        <h3 className="text-lg font-bold text-white">Without Engine</h3>
+                      </div>
                     </div>
-                    <span className="text-[11px] font-bold text-zinc-300 bg-white/5 border border-white/10 px-3 py-1 rounded-full uppercase tracking-wider">
-                      Without Engine · Cloud Sync
+                    <span className="px-2.5 py-1 rounded-full text-[10px] font-bold bg-white/5 text-zinc-300 border border-white/15">
+                      Browser
                     </span>
                   </div>
 
-                  <h3 className="text-xl font-bold text-white">
-                    Cloud Processing & Storage
-                  </h3>
-
-                  <p className="text-xs sm:text-sm text-zinc-300 leading-relaxed">
-                    Prefer not to install anything on your machine? Run everything seamlessly through our high-speed cloud infrastructure directly from your web browser.
-                  </p>
-
                   <p className="text-xs text-zinc-400 leading-relaxed">
-                    Edit and format clips from any browser, save them securely to your personal Cloud Storage library, and come back later whenever you want to download or post them. Zero memory, disk space, or battery used on your laptop.
+                    Uses our high-performance cloud servers to fetch, trim, and render clips with zero local setup required.
                   </p>
 
-                  <div className="pt-2 space-y-2 text-xs text-zinc-300">
-                    <div className="flex items-center gap-2">
-                      <Check className="w-4 h-4 text-zinc-400 shrink-0" />
-                      <span>100% in-browser — zero downloads or installation needed</span>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <Check className="w-4 h-4 text-zinc-400 shrink-0" />
-                      <span>Dedicated Cloud Storage to store and organize your clips</span>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <Check className="w-4 h-4 text-zinc-400 shrink-0" />
-                      <span>Access, download, and publish anytime from mobile or desktop</span>
-                    </div>
+                  <div className="space-y-3 pt-2 border-t border-white/10">
+                    {[
+                      'Zero installation — runs instantly in any modern web browser',
+                      'Works seamlessly on mobile phones, Mac, PC, Chromebook',
+                      'Secure cloud storage vault for your clipped video library',
+                      'Instant link sharing, real-time waveform, & online preview',
+                    ].map((feature, idx) => (
+                      <div key={idx} className="flex items-center gap-2.5 text-xs text-zinc-400">
+                        <div className="w-4 h-4 rounded-full bg-white/10 text-zinc-300 flex items-center justify-center shrink-0">
+                          <Check className="w-2.5 h-2.5" />
+                        </div>
+                        <span>{feature}</span>
+                      </div>
+                    ))}
                   </div>
                 </div>
 
-                <div className="pt-4 border-t border-white/10">
+                {/* Bottom Action: Use Browser Mode */}
+                <div className="pt-8">
                   <button
                     onClick={() => {
                       const input = document.querySelector('input[type="url"]') as HTMLInputElement;
                       if (input) input.focus();
                       window.scrollTo({ top: 0, behavior: 'smooth' });
                     }}
-                    className="w-full py-3 rounded-xl bg-white/10 hover:bg-white/15 text-white font-bold text-xs flex items-center justify-center gap-2 border border-white/15 transition-all"
+                    className="w-full flex items-center justify-center gap-2 py-3 px-4 rounded-xl border border-white/15 bg-white/5 hover:bg-white/10 text-white font-semibold text-xs transition-all hover:border-white/30 active:scale-[0.99] cursor-pointer"
                   >
-                    <span>Use Browser & Cloud Mode</span>
-                    <ArrowRight className="w-4 h-4" />
+                    <span>Use Browser &amp; Cloud Mode</span>
+                    <ArrowRight className="w-3.5 h-3.5 text-zinc-400" />
                   </button>
                 </div>
               </div>
@@ -925,11 +840,11 @@ export default function ClipFlowHome() {
         </section>
 
         {/* ── Section 6: CTA Join ─────────────────────────────────────── */}
-        <section className="py-24 px-6 bg-black">
+        <section className="py-20 px-6 bg-black">
           <div className="max-w-3xl mx-auto text-center space-y-8">
             {/* Social proof avatars */}
             <div className="flex items-center justify-center gap-1">
-              {['#8b5cf6', '#ec4899', '#06b6d4', '#10b981', '#f59e0b'].map((c, i) => (
+              {['#0284c7', '#0ea5e9', '#06b6d4', '#10b981', '#3b82f6'].map((c, i) => (
                 <div
                   key={i}
                   className="w-8 h-8 rounded-full border-2 border-black -ml-2 first:ml-0 flex items-center justify-center text-white text-[10px] font-bold"
@@ -949,8 +864,8 @@ export default function ClipFlowHome() {
             >
               <h2 className="text-3xl sm:text-4xl lg:text-5xl font-extrabold text-white leading-tight tracking-tight">
                 Join{' '}
-                <span className="text-transparent bg-clip-text bg-gradient-to-r from-purple-400 via-fuchsia-400 to-indigo-400">
-                  400+ Creators & Media Teams
+                <span className="text-transparent bg-clip-text bg-gradient-to-r from-sky-400 via-blue-400 to-cyan-400">
+                  400+ Creators &amp; Media Teams
                 </span>{' '}
                 Today
               </h2>
@@ -966,27 +881,26 @@ export default function ClipFlowHome() {
                   if (input) input.focus();
                   window.scrollTo({ top: 0, behavior: 'smooth' });
                 }}
-                className="flex items-center gap-2 px-7 py-3.5 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white font-bold text-sm shadow-xl shadow-purple-600/25 transition-all hover:scale-[1.02] active:scale-[0.98]"
+                className="flex items-center gap-2 px-7 py-3.5 rounded-xl bg-gradient-to-r from-blue-600 to-sky-600 hover:from-blue-500 hover:to-sky-500 text-white font-bold text-sm shadow-xl shadow-blue-600/25 transition-all hover:scale-[1.02] active:scale-[0.98] cursor-pointer"
               >
                 <Scissors className="w-4 h-4" />
                 <span>Start ClipFlow</span>
                 <ArrowRight className="w-4 h-4" />
               </button>
-              <button
-                onClick={() => {
-                  const input = document.querySelector('input[type="url"]') as HTMLInputElement;
-                  if (input) input.focus();
-                  window.scrollTo({ top: 0, behavior: 'smooth' });
-                }}
-                className="flex items-center gap-2 px-7 py-3.5 rounded-xl border border-white/15 bg-white/5 hover:bg-white/10 text-white font-semibold text-sm transition-all hover:border-white/25"
+              <a
+                href="mailto:clipflovv@gmail.com"
+                className="flex items-center gap-2 px-7 py-3.5 rounded-xl border border-white/15 bg-white/5 hover:bg-white/10 text-white font-semibold text-sm transition-all hover:border-white/25 cursor-pointer"
               >
-                <span>Try a Demo URL</span>
-              </button>
+                <span>Contact Us</span>
+              </a>
             </div>
 
-            <p className="text-[11px] text-gray-600">
-              No credit card required &nbsp;·&nbsp; Free forever core &nbsp;·&nbsp; Instant download
-            </p>
+            {/* Direct Contact Information (Clean seamless text, no extra boxes) */}
+            <div className="pt-4 flex items-center justify-center gap-2 sm:gap-3 text-xs text-zinc-400 flex-wrap">
+              <span>Contact: <strong className="text-white font-semibold">Cliy</strong></span>
+              <span className="text-zinc-600">•</span>
+              <span>Email: <a href="mailto:clipflovv@gmail.com" className="text-zinc-300 hover:text-white hover:underline font-mono">clipflovv@gmail.com</a></span>
+            </div>
           </div>
         </section>
 
@@ -998,9 +912,20 @@ export default function ClipFlowHome() {
               <span className="text-xs font-bold text-gray-400">ClipFlow</span>
               <span className="text-xs text-gray-600">— Professional Video Studio</span>
             </div>
-            <p className="text-[11px] text-gray-700">
-              © 2026 ClipFlow. All rights reserved.
-            </p>
+            <div className="flex items-center gap-6 text-xs text-gray-500">
+              <Link to="/editor" className="hover:text-gray-300 transition-colors">
+                Studio
+              </Link>
+              <Link to="/upgrade" className="hover:text-gray-300 transition-colors">
+                Upgrade
+              </Link>
+              <Link to="/terms" className="text-gray-400 hover:text-sky-400 transition-colors">
+                Terms of Service
+              </Link>
+              <span className="text-[11px] text-gray-700">
+                © 2026 ClipFlow. All rights reserved.
+              </span>
+            </div>
           </div>
         </footer>
 
@@ -1012,22 +937,21 @@ export default function ClipFlowHome() {
         onClose={() => setShowAuthModal(false)}
       />
 
-      {/* ── Clip Download Selection Modal (5s Ad & Pro Option) ───────────── */}
-      <ClipDownloadModal
+      {/* ── Clip Download Selection Modal (ON HOLD - routing directly to Pro) ───────────── */}
+      {/* <ClipDownloadModal
         isOpen={isClipModalOpen}
         onClose={() => setIsClipModalOpen(false)}
         videoUrl={selectedClipUrl}
         onOpenAuthModal={() => setShowAuthModal(true)}
-      />
+      /> */}
 
-      {/* ── Video Player 80% Pop-up Modal ─────────────────────────────────── */}
+      {/* ── Video Player 80% Pop-up Modal (COMMENTED OUT FOR NOW) ──
       <AnimatePresence>
         {isVideoModalOpen && (
           <div
             onClick={() => setIsVideoModalOpen(false)}
             className="fixed inset-0 z-[100] flex items-center justify-center p-4 sm:p-8 bg-black/90 backdrop-blur-2xl animate-in fade-in duration-200"
           >
-            {/* Modal Container covering 80% of screen */}
             <motion.div
               initial={{ opacity: 0, scale: 0.92, y: 10 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
@@ -1036,7 +960,6 @@ export default function ClipFlowHome() {
               onClick={(e) => e.stopPropagation()}
               className="relative w-[86vw] max-w-6xl aspect-video max-h-[82vh] bg-black border border-white/20 rounded-2xl sm:rounded-3xl shadow-[0_0_90px_rgba(168,85,247,0.35)] overflow-hidden flex items-center justify-center"
             >
-              {/* Close Button */}
               <button
                 onClick={() => setIsVideoModalOpen(false)}
                 className="absolute top-4 right-4 z-30 p-2.5 rounded-full bg-black/70 hover:bg-white/20 text-white/80 hover:text-white border border-white/20 transition-all shadow-lg hover:scale-105 active:scale-95"
@@ -1045,7 +968,6 @@ export default function ClipFlowHome() {
                 <X className="w-5 h-5" />
               </button>
 
-              {/* Video Element */}
               <video
                 id="clipflow-popup-video"
                 className="w-full h-full object-contain bg-black"
@@ -1053,12 +975,44 @@ export default function ClipFlowHome() {
                 autoPlay
                 playsInline
               >
-                {/* 
-                  Add your source file here, e.g.:
-                  <source src="/demo.mp4" type="video/mp4" />
-                */}
                 Your browser does not support HTML5 video.
               </video>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+      ── */}
+
+      {/* ── Fullscreen Image Preview Modal (Exact Image Size with Attached Close Button) ── */}
+      <AnimatePresence>
+        {previewImage && (
+          <div
+            onClick={() => setPreviewImage(null)}
+            className="fixed inset-0 z-[150] flex items-center justify-center p-3 sm:p-6 bg-black/85 backdrop-blur-md animate-in fade-in duration-150 cursor-pointer"
+          >
+            <motion.div
+              initial={{ opacity: 0, scale: 0.96 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.96 }}
+              transition={{ duration: 0.15 }}
+              onClick={(e: React.MouseEvent) => e.stopPropagation()}
+              className="relative inline-block max-w-[95vw] max-h-[92vh] select-none cursor-default"
+            >
+              {/* Close X Button attached directly to top-right of image */}
+              <button
+                onClick={() => setPreviewImage(null)}
+                className="absolute top-3 right-3 z-30 p-2 rounded-full bg-black/80 hover:bg-black text-white/90 hover:text-white border border-white/25 shadow-xl transition-all hover:scale-110 active:scale-95 cursor-pointer backdrop-blur-md"
+                title="Close (Esc)"
+              >
+                <X className="w-4 h-4 sm:w-5 sm:h-5" />
+              </button>
+
+              {/* Exact image display */}
+              <img
+                src={previewImage}
+                alt="Full Preview"
+                className="w-auto h-auto max-w-[92vw] max-h-[88vh] object-contain rounded-xl shadow-[0_0_50px_rgba(0,0,0,0.9)] border border-white/10 block"
+              />
             </motion.div>
           </div>
         )}

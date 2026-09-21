@@ -14,8 +14,7 @@ import {
   Cloud, HardDrive, Check, X,
   Settings, ChevronDown, Download,
   Image as ImageIcon,
-  Loader2,
-  Zap
+  Loader2
 } from 'lucide-react';
 import * as Slider from '@radix-ui/react-slider';
 import YouTube, { type YouTubePlayer } from 'react-youtube';
@@ -25,7 +24,6 @@ import { useAuth } from '../context/AuthContext';
 import { CloudStorageModal } from '../components/CloudStorageModal';
 import { AuthModal } from '../components/AuthModal';
 import { ExportFormatSection } from '../components/ExportFormatSection';
-import { UserProfileMenu } from '../components/UserProfileMenu';
 import { EditorSidebar } from '../components/EditorSidebar';
 import { CropFrameOverlay, type CropBox } from '../components/CropFrameOverlay';
 import { useTwitchPreview } from '../components/Twitch/useTwitchPreview';
@@ -140,7 +138,11 @@ export default function ClipFlowEditor() {
   const initialProcessingMode: ProcessingMode = useMemo(() => {
     // 1. Explicit query param in URL (?mode=free | ?mode=pro | ?engine=local | ?engine=server)
     if (modeParam === 'pro' || engineParam === 'server') return 'pro';
+    
+    // NOTE: Desktop helper app is currently on hold, defaulting all requests to Pro
+    /*
     if (modeParam === 'free' || engineParam === 'local') return 'free';
+    */
 
     // 2. Existing editor session state for this URL
     if (initialSession?.processingMode) return initialSession.processingMode;
@@ -150,9 +152,9 @@ export default function ClipFlowEditor() {
     const stored = getStoredProcessingMode();
     if (stored) return stored;
 
-    // 4. Default: Pro account gets pro, free account gets free
-    return isPro ? 'pro' : 'free';
-  }, [modeParam, engineParam, initialSession?.processingMode, initialSession?.exportMode, isPro]);
+    // 4. Default: Pro cloud processing while helper app is on hold
+    return 'pro';
+  }, [modeParam, engineParam, initialSession?.processingMode, initialSession?.exportMode]);
 
   const [processingMode, setProcessingMode] = useState<ProcessingMode>(initialProcessingMode);
   const isProUser = processingMode === 'pro';
@@ -319,6 +321,24 @@ export default function ClipFlowEditor() {
 
   const effectiveDuration = actualDuration > 0 ? actualDuration : (metadata?.duration && metadata.duration > 0 ? metadata.duration : 0);
 
+  const youtubeOpts = useMemo(() => ({
+    width: '100%',
+    height: '100%',
+    playerVars: {
+      autoplay: 0,
+      controls: 0,
+      disablekb: 1,
+      fs: 0,
+      modestbranding: 1,
+      rel: 0,
+      showinfo: 0,
+      iv_load_policy: 3,
+      cc_load_policy: 0,
+      playsinline: 1,
+      enablejsapi: 1,
+    },
+  }), []);
+
   const [volume, setVolume] = useState<number>(() => {
     try {
       const v = localStorage.getItem('clipflow_volume');
@@ -387,21 +407,31 @@ export default function ClipFlowEditor() {
           youtubePlayerRef.current.mute();
         } else {
           youtubePlayerRef.current.unMute();
-          youtubePlayerRef.current.setVolume(Math.round(volume * 100));
+          const targetVol = volume === 0 ? 0.5 : volume;
+          if (volume === 0) {
+            setVolume(0.5);
+            try { localStorage.setItem('clipflow_volume', '0.5'); } catch {}
+          }
+          youtubePlayerRef.current.setVolume(Math.round(targetVol * 100));
         }
       } catch (e) { }
     } else {
+      const targetVol = (!nextMute && volume === 0) ? 0.5 : volume;
+      if (!nextMute && volume === 0) {
+        setVolume(0.5);
+        try { localStorage.setItem('clipflow_volume', '0.5'); } catch {}
+      }
       if (videoElementRef.current) {
         videoElementRef.current.muted = nextMute;
-        videoElementRef.current.volume = volume;
+        videoElementRef.current.volume = targetVol;
       }
       if (videoAElementRef.current) {
         videoAElementRef.current.muted = nextMute;
-        videoAElementRef.current.volume = volume;
+        videoAElementRef.current.volume = targetVol;
       }
       if (videoBElementRef.current) {
         videoBElementRef.current.muted = nextMute;
-        videoBElementRef.current.volume = volume;
+        videoBElementRef.current.volume = targetVol;
       }
     }
   };
@@ -1455,9 +1485,14 @@ export default function ClipFlowEditor() {
           try {
             const v = videoElementRef.current;
             setCurrentTime(v.currentTime);
-            const isExplicitSubClip = isTrimEnabled && (trimRange[0] > 1 || (trimRange[1] > 0 && trimRange[1] < effectiveDuration - 2));
-            if (isExplicitSubClip && v.currentTime >= trimRange[1]) {
-              seekToPosition(trimRange[0]);
+            const clipStart = trimRange[0];
+            const clipEnd = trimRange[1] > clipStart ? trimRange[1] : (effectiveDuration || clipStart + 60);
+            if (v.currentTime >= clipEnd) {
+              v.currentTime = clipStart;
+              setCurrentTime(clipStart);
+            } else if (v.currentTime < clipStart - 0.5) {
+              v.currentTime = clipStart;
+              setCurrentTime(clipStart);
             }
           } catch (e) { }
         }
@@ -1501,9 +1536,16 @@ export default function ClipFlowEditor() {
               setCurrentTime(time);
             }
 
-            const isExplicitSubClip = isTrimEnabled && (trimRange[0] > 1 || (trimRange[1] > 0 && trimRange[1] < effectiveDuration - 2));
-            if (isExplicitSubClip && !isSeekingRef.current && time >= trimRange[1] && time < trimRange[1] + 1.5) {
-              youtubePlayerRef.current.seekTo(trimRange[0], true);
+            const clipStart = trimRange[0];
+            const clipEnd = trimRange[1] > clipStart ? trimRange[1] : (effectiveDuration || clipStart + 60);
+            if (!isSeekingRef.current) {
+              if (time >= clipEnd) {
+                youtubePlayerRef.current.seekTo(clipStart, true);
+                setCurrentTime(clipStart);
+              } else if (time < clipStart - 0.5) {
+                youtubePlayerRef.current.seekTo(clipStart, true);
+                setCurrentTime(clipStart);
+              }
             }
           }
         } catch (e) { }
@@ -1675,13 +1717,50 @@ export default function ClipFlowEditor() {
     }
   };
 
+  // Play video strictly from start of clip time to end clip time
+  const playClipFromStart = (startPos?: number) => {
+    const target = startPos !== undefined ? startPos : trimRange[0];
+    seekOriginTimeRef.current = currentTime;
+    pendingSeekTimeRef.current = target;
+    isSeekingRef.current = true;
+    lastSeekTimeRef.current = Date.now();
+    setCurrentTime(target);
+    setIsPlaying(true);
+
+    if (youtubeId && youtubePlayerRef.current) {
+      try {
+        youtubePlayerRef.current.seekTo(target, true);
+        youtubePlayerRef.current.playVideo();
+      } catch (e) { }
+    } else if (isLiveChannelUrl) {
+      seekToPosition(target);
+      const activeTag = activeLivePlayerRef.current;
+      const standbyTag = activeTag === 'A' ? 'B' : 'A';
+      safePausePlayer(standbyTag);
+      safePlayPlayer(activeTag);
+    } else if (videoElementRef.current) {
+      const v = videoElementRef.current;
+      try {
+        v.currentTime = target;
+        v.play().catch(() => { });
+      } catch (e) { }
+    }
+  };
+
   // Play / Pause toggle
   const togglePlay = () => {
+    const clipStart = trimRange[0];
+    const clipEnd = trimRange[1] > clipStart ? trimRange[1] : (effectiveDuration || clipStart + 60);
+
     if (youtubeId && youtubePlayerRef.current) {
       if (isPlaying) {
         try { youtubePlayerRef.current.pauseVideo(); } catch (e) { }
         setIsPlaying(false);
       } else {
+        if (currentTime >= clipEnd - 0.1 || currentTime < clipStart) {
+          youtubePlayerRef.current.seekTo(clipStart, true);
+          setCurrentTime(clipStart);
+        }
         try { youtubePlayerRef.current.playVideo(); } catch (e) { }
         setIsPlaying(true);
       }
@@ -1704,6 +1783,10 @@ export default function ClipFlowEditor() {
           activeVideo.pause();
           setIsPlaying(false);
         } else {
+          if (activeVideo.currentTime >= clipEnd - 0.1 || activeVideo.currentTime < clipStart) {
+            activeVideo.currentTime = clipStart;
+            setCurrentTime(clipStart);
+          }
           activeVideo.play().catch(() => { });
           setIsPlaying(true);
         }
@@ -1993,8 +2076,9 @@ export default function ClipFlowEditor() {
 
   // Seek backward/forward by seconds
   const seekRelative = (seconds: number) => {
-    const maxDur = metadata?.duration || 99999;
-    const newTime = Math.max(0, Math.min(currentTime + seconds, maxDur));
+    const clipStart = trimRange[0];
+    const clipEnd = trimRange[1] > clipStart ? trimRange[1] : (effectiveDuration || clipStart + 60);
+    const newTime = Math.max(clipStart, Math.min(currentTime + seconds, clipEnd));
     seekToPosition(newTime);
   };
 
@@ -2352,14 +2436,14 @@ export default function ClipFlowEditor() {
               <motion.div
                 animate={{ rotate: 360 }}
                 transition={{ repeat: Infinity, duration: 1, ease: 'linear' }}
-                className="w-4 h-4 border-2 border-purple-500/30 border-t-purple-400 rounded-full shrink-0"
+                className="w-4 h-4 border-2 border-blue-500/30 border-t-blue-400 rounded-full shrink-0"
               />
             )}
 
             {metadata && (
               <div className="flex items-center gap-2 min-w-0">
                 {metadata.uploader && (
-                  <span className="text-[11px] font-semibold px-2 py-0.5 rounded-md bg-purple-500/10 border border-purple-500/20 text-purple-300 shrink-0 max-w-[150px] truncate" title={metadata.uploader}>
+                  <span className="text-[11px] font-semibold px-2 py-0.5 rounded-md bg-white/5 border border-white/10 text-zinc-300 shrink-0 max-w-[150px] truncate" title={metadata.uploader}>
                     {metadata.uploader}
                   </span>
                 )}
@@ -2385,11 +2469,6 @@ export default function ClipFlowEditor() {
                 <span className="sm:hidden">Engine</span>
               </button>
             )}
-
-            <UserProfileMenu
-              onOpenCloudStorage={() => setShowCloudStorageModal(true)}
-              onOpenAuth={() => setShowAuthModal(true)}
-            />
           </div>
         </header>
 
@@ -2405,7 +2484,7 @@ export default function ClipFlowEditor() {
                 <motion.div
                   animate={{ rotate: 360 }}
                   transition={{ repeat: Infinity, duration: 1, ease: 'linear' }}
-                  className="w-10 h-10 border-3 border-purple-500/20 border-t-purple-400 rounded-full"
+                  className="w-10 h-10 border-3 border-blue-500/20 border-t-blue-400 rounded-full"
                 />
                 <p className="text-sm text-gray-400 font-medium">Extracting video streams...</p>
               </div>
@@ -2438,8 +2517,8 @@ export default function ClipFlowEditor() {
             {/* No video yet */}
             {!metadata && !isLoadingMeta && !errorMeta && (
               <div className="flex-1 flex flex-col items-center justify-center gap-5 text-center p-6 min-h-[350px]">
-                <div className="w-16 h-16 rounded-2xl bg-purple-500/10 border border-purple-500/20 flex items-center justify-center">
-                  <Film className="w-7 h-7 text-purple-400" />
+                <div className="w-16 h-16 rounded-2xl bg-blue-500/10 border border-blue-500/20 flex items-center justify-center">
+                  <Film className="w-7 h-7 text-blue-400" />
                 </div>
                 <div className="space-y-2">
                   <h2 className="text-lg font-bold text-white">No video loaded</h2>
@@ -2447,7 +2526,7 @@ export default function ClipFlowEditor() {
                 </div>
                 <button
                   onClick={() => setShowUrlChange(true)}
-                  className="px-5 py-2.5 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-semibold text-sm transition-colors"
+                  className="px-5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold text-sm transition-colors"
                 >
                   Paste Video URL
                 </button>
@@ -2501,25 +2580,7 @@ export default function ClipFlowEditor() {
                               iframeClassName={`w-full h-full block border-0 ${
                                 (isDraggingHSplitter || isDraggingVSplitter || isDraggingLSplitter) ? 'pointer-events-none' : 'pointer-events-auto'
                               }`}
-                              opts={{
-                                width: '100%',
-                                height: '100%',
-                                playerVars: {
-                                  autoplay: 0,
-                                  mute: isMuted ? 1 : 0,
-                                  controls: 0,
-                                  disablekb: 1,
-                                  fs: 0,
-                                  modestbranding: 1,
-                                  rel: 0,
-                                  showinfo: 0,
-                                  iv_load_policy: 3,
-                                  cc_load_policy: 0,
-                                  playsinline: 1,
-                                  enablejsapi: 1,
-                                  start: Math.floor(trimRange[0] || 0),
-                                },
-                              }}
+                              opts={youtubeOpts}
                               onReady={(e) => {
                                 youtubePlayerRef.current = e.target;
                                 try {
@@ -2528,7 +2589,7 @@ export default function ClipFlowEditor() {
                                     e.target.unloadModule('cc');
                                   }
                                 } catch (err) { }
-                                if (isMuted) {
+                                if (isMuted || volume === 0) {
                                   e.target.mute();
                                 } else {
                                   e.target.unMute();
@@ -2579,10 +2640,11 @@ export default function ClipFlowEditor() {
                                 } else if (e.data === 3) {
                                   setIsVideoBuffering(true);
                                 } else if (e.data === 0) {
-                                  setIsPlaying(false);
                                   setIsVideoBuffering(false);
                                   if (youtubePlayerRef.current) {
-                                    youtubePlayerRef.current.seekTo(isTrimEnabled ? trimRange[0] : 0, true);
+                                    youtubePlayerRef.current.seekTo(trimRange[0], true);
+                                    try { youtubePlayerRef.current.playVideo(); } catch { }
+                                    setIsPlaying(true);
                                   }
                                 }
                               }}
@@ -2762,9 +2824,14 @@ export default function ClipFlowEditor() {
                                   return; // Ignore stale time updates while seek is pending/in-flight
                                 }
                                 setCurrentTime(v.currentTime);
-                                const isExplicitSubClip = isTrimEnabled && (trimRange[0] > 1 || (trimRange[1] > 0 && trimRange[1] < effectiveDuration - 2));
-                                if (isExplicitSubClip && v.currentTime >= trimRange[1]) {
-                                  seekToPosition(trimRange[0]);
+                                const clipStart = trimRange[0];
+                                const clipEnd = trimRange[1] > clipStart ? trimRange[1] : (effectiveDuration || clipStart + 60);
+                                if (v.currentTime >= clipEnd) {
+                                  v.currentTime = clipStart;
+                                  setCurrentTime(clipStart);
+                                } else if (v.currentTime < clipStart - 0.5) {
+                                  v.currentTime = clipStart;
+                                  setCurrentTime(clipStart);
                                 }
                               }
                             }}
@@ -2800,10 +2867,11 @@ export default function ClipFlowEditor() {
                             }}
                             onEnded={() => {
                               console.log('%c[ClipFlow ⏹️ VIDEO ENDED]', 'color: #6b7280;');
-                              setIsPlaying(false);
                               setIsVideoBuffering(false);
                               if (videoElementRef.current) {
-                                videoElementRef.current.currentTime = isTrimEnabled ? trimRange[0] : 0;
+                                videoElementRef.current.currentTime = trimRange[0];
+                                videoElementRef.current.play().catch(() => {});
+                                setIsPlaying(true);
                               }
                             }}
                             className="w-full h-full object-contain pointer-events-none"
@@ -2934,22 +3002,22 @@ export default function ClipFlowEditor() {
                           <RotateCw className="w-3.5 h-3.5 text-zinc-400" />
                         </button>
 
-                        {/* Volume Control (Mute Toggle + Interactive Slider) */}
-                        <div className="flex items-center gap-1.5 ml-1 bg-white/[0.04] hover:bg-white/[0.08] px-1.5 py-0.5 rounded-lg border border-white/[0.06] transition-colors">
+                        {/* Volume Control (Hover to expand slider, no box) */}
+                        <div className="group/vol flex items-center ml-1">
                           <button
                             type="button"
                             onClick={toggleMute}
-                            className="p-1.5 rounded-md hover:bg-white/[0.1] text-gray-300 hover:text-white transition-colors flex items-center justify-center cursor-pointer"
-                            title={isMuted || volume === 0 ? 'Unmute Audio' : `Mute Audio (${Math.round(volume * 100)}%)`}
+                            className="p-1.5 rounded-lg hover:bg-white/[0.1] text-zinc-300 hover:text-white transition-colors flex items-center justify-center cursor-pointer"
+                            title={isMuted || volume === 0 ? 'Unmute Audio' : `Volume: ${Math.round(volume * 100)}% (Click to mute)`}
                           >
                             {isMuted || volume === 0 ? (
                               <VolumeX className="w-3.5 h-3.5 text-red-400" />
                             ) : (
-                              <Volume2 className="w-3.5 h-3.5 text-zinc-300" />
+                              <Volume2 className="w-3.5 h-3.5 text-zinc-300 group-hover/vol:text-white" />
                             )}
                           </button>
-                          {/* Smooth Volume Slider */}
-                          <div className="flex items-center gap-1.5 w-16 sm:w-20">
+                          {/* Smooth Expandable Slider on Hover */}
+                          <div className="flex items-center gap-1.5 w-0 opacity-0 group-hover/vol:w-24 group-hover/vol:opacity-100 overflow-hidden transition-all duration-200 ease-out pl-0.5 pr-1">
                             <input
                               type="range"
                               min={0}
@@ -2957,10 +3025,10 @@ export default function ClipFlowEditor() {
                               step={0.01}
                               value={isMuted ? 0 : volume}
                               onChange={(e) => handleVolumeChange(parseFloat(e.target.value))}
-                              className="w-full h-1.5 bg-white/20 rounded-lg appearance-none cursor-pointer accent-white hover:accent-purple-400 transition-all"
+                              className="w-16 h-1.5 bg-white/20 rounded-lg appearance-none cursor-pointer accent-white hover:accent-purple-400 transition-all shrink-0"
                               title={`Volume: ${isMuted ? 0 : Math.round(volume * 100)}%`}
                             />
-                            <span className="text-[10px] font-mono text-zinc-400 select-none w-6 text-right hidden sm:inline-block">
+                            <span className="text-[10px] font-mono text-zinc-400 select-none shrink-0 w-6 text-right">
                               {isMuted ? '0%' : `${Math.round(volume * 100)}%`}
                             </span>
                           </div>
@@ -3197,22 +3265,26 @@ export default function ClipFlowEditor() {
                             if (val[0] !== trimRange[0]) {
                               setCurrentTime(val[0]);
                               pendingSeekTimeRef.current = val[0];
+                              if (youtubeId && youtubePlayerRef.current) {
+                                try { youtubePlayerRef.current.seekTo(val[0], true); } catch {}
+                              } else if (videoElementRef.current) {
+                                try { videoElementRef.current.currentTime = val[0]; } catch {}
+                              }
                             } else if (val[1] !== trimRange[1]) {
                               setCurrentTime(val[1]);
                               pendingSeekTimeRef.current = val[1];
+                              if (youtubeId && youtubePlayerRef.current) {
+                                try { youtubePlayerRef.current.seekTo(val[1], true); } catch {}
+                              } else if (videoElementRef.current) {
+                                try { videoElementRef.current.currentTime = val[1]; } catch {}
+                              }
                             }
                           }
                         }}
                         onValueCommit={(val) => {
-                          if (val[0] !== trimRange[0]) {
-                            seekToPosition(val[0]);
-                          } else if (val[1] !== trimRange[1]) {
-                            seekToPosition(val[1]);
-                          } else {
-                            isSeekingRef.current = false;
-                            pendingSeekTimeRef.current = null;
-                            seekOriginTimeRef.current = null;
-                          }
+                          setTrimRange([val[0], val[1]]);
+                          // Play video from start of clip time to end of clip time
+                          playClipFromStart(val[0]);
                         }}
                       >
                         <Slider.Track className="relative flex-grow h-full rounded-xl cursor-pointer">
@@ -3256,7 +3328,7 @@ export default function ClipFlowEditor() {
                             const val = parseTime(e.target.value);
                             if (!isNaN(val) && val < trimRange[1]) {
                               setTrimRange([val, trimRange[1]]);
-                              seekToPosition(val);
+                              playClipFromStart(val);
                             }
                           }}
                           className="w-16 bg-black/50 border border-white/10 rounded-lg px-1.5 py-1 text-center text-zinc-200 font-bold focus:outline-none focus:border-zinc-400 text-[11px]"
@@ -3269,6 +3341,7 @@ export default function ClipFlowEditor() {
                             const val = parseTime(e.target.value);
                             if (!isNaN(val) && val > trimRange[0]) {
                               setTrimRange([trimRange[0], Math.min(effectiveDuration > 0 ? effectiveDuration : 9999, val)]);
+                              playClipFromStart(trimRange[0]);
                             }
                           }}
                           className="w-16 bg-black/50 border border-white/10 rounded-lg px-1.5 py-1 text-center text-zinc-200 font-bold focus:outline-none focus:border-zinc-400 text-[11px]"
@@ -3581,7 +3654,7 @@ export default function ClipFlowEditor() {
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
                       <span className="text-[11px] font-bold text-gray-600 tabular-nums">3.</span>
-                      <h3 className="text-xs font-bold text-white uppercase tracking-wider">Export Mode & Storage</h3>
+                      <h3 className="text-xs font-bold text-white uppercase tracking-wider">File Name & Output</h3>
                     </div>
                   </div>
 
@@ -3593,34 +3666,8 @@ export default function ClipFlowEditor() {
                       value={customFileName}
                       onChange={(e) => setCustomFileName(e.target.value)}
                       placeholder={metadata?.title || 'ClipFlow_Output'}
-                      className="w-full bg-black/40 border border-white/[0.07] rounded-xl px-3 py-2 text-xs text-white placeholder-gray-600 focus:outline-none focus:border-purple-500 font-medium transition-colors"
+                      className="w-full bg-black/40 border border-white/[0.07] rounded-xl px-3 py-2 text-xs text-white placeholder-gray-600 focus:outline-none focus:border-blue-500 font-medium transition-colors"
                     />
-                  </div>
-
-                  {/* Active Processing Engine Status Indicator */}
-                  <div className="space-y-1.5">
-                    <label className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider">Processing Engine</label>
-                    {isProUser ? (
-                      <div className="flex items-center justify-between p-2.5 rounded-xl bg-purple-950/30 border border-purple-500/30">
-                        <div className="flex items-center gap-2">
-                          <Zap className="w-3.5 h-3.5 text-purple-400" />
-                          <span className="text-xs font-semibold text-purple-200">Dedicated Cloud Server</span>
-                        </div>
-                        <span className="px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-300 text-[9px] font-bold border border-purple-500/30">
-                          PRO Active
-                        </span>
-                      </div>
-                    ) : (
-                      <div className="flex items-center justify-between p-2.5 rounded-xl bg-white/[0.03] border border-white/10">
-                        <div className="flex items-center gap-2">
-                          <HardDrive className="w-3.5 h-3.5 text-zinc-400" />
-                          <span className="text-xs font-semibold text-zinc-300">Local Companion Engine</span>
-                        </div>
-                        <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${isHelperRunning ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' : 'bg-zinc-800 text-zinc-400'}`}>
-                          {isHelperRunning ? '● Connected' : 'Local Mode'}
-                        </span>
-                      </div>
-                    )}
                   </div>
                 </div>
 
@@ -3637,7 +3684,7 @@ export default function ClipFlowEditor() {
                   animate={{ opacity: 1, y: 0 }}
                   className={`px-3 py-2 rounded-lg text-[11px] flex items-center justify-between gap-2 border ${downloadStatus === 'success' ? 'bg-emerald-500/10 border-emerald-500/25 text-emerald-300' :
                     downloadStatus === 'error' ? 'bg-red-500/10 border-red-500/25 text-red-300' :
-                      'bg-purple-500/10 border-purple-500/25 text-purple-300'
+                      'bg-blue-500/10 border-blue-500/25 text-blue-300'
                     }`}
                 >
                   <div className="flex items-center gap-2 min-w-0">
@@ -3650,7 +3697,7 @@ export default function ClipFlowEditor() {
                   {downloadStatus === 'success' && exportMode === 'pro' && (
                     <button
                       onClick={() => navigate('/editor/storage')}
-                      className="flex items-center gap-1 text-[10px] font-bold text-white bg-purple-600 hover:bg-purple-500 px-2 py-1 rounded-md shrink-0 transition-colors"
+                      className="flex items-center gap-1 text-[10px] font-bold text-white bg-blue-600 hover:bg-blue-500 px-2 py-1 rounded-md shrink-0 transition-colors"
                     >
                       <Cloud className="w-3 h-3" />
                       <span>View in Storage</span>
@@ -3662,7 +3709,7 @@ export default function ClipFlowEditor() {
               <button
                 onClick={handleExportDownload}
                 disabled={isDownloading || !metadata}
-                className="w-full py-3.5 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white font-bold text-sm shadow-lg shadow-purple-600/25 transition-all flex items-center justify-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed group"
+                className="w-full py-3.5 rounded-xl bg-gradient-to-r from-blue-600 to-sky-600 hover:from-blue-500 hover:to-sky-500 text-white font-bold text-sm shadow-md shadow-blue-600/20 transition-all flex items-center justify-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed group cursor-pointer"
               >
                 {isDownloading ? (
                   <>
