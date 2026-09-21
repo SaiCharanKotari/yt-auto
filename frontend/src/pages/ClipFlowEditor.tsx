@@ -1688,16 +1688,14 @@ export default function ClipFlowEditor() {
           // Swap to target player atomically
           swapToLiveChunk(targetPlayerTag, chunkOffset, localTime);
 
-          isSeekingLiveRef.current = false;
-          pendingSeekTimeRef.current = null;
-          isSeekingRef.current = false;
-
           console.log(`[Twitch LIVE ✅ SEEK COMPLETE] Gen ${currentGen} -> Player ${targetPlayerTag} @ chunk ${chunkOffset}s + local ${localTime.toFixed(2)}s`);
         } catch (err: any) {
           if (err.name === 'AbortError') return;
           console.warn('[Twitch LIVE ❌ SEEK ERROR]', err.message);
+        } finally {
           if (liveSeekGenRef.current === currentGen) {
             isSeekingLiveRef.current = false;
+            pendingSeekTimeRef.current = null;
             isSeekingRef.current = false;
             setIsVideoBuffering(false);
           }
@@ -1717,6 +1715,21 @@ export default function ClipFlowEditor() {
     }
   };
 
+  // Pause video and seek to position (never auto-plays — user must click Play)
+  const pauseAndSeek = (targetPos: number) => {
+    setIsPlaying(false);
+    isPlayingRef.current = false;
+    safePausePlayer('A');
+    safePausePlayer('B');
+    if (videoElementRef.current && !videoElementRef.current.paused) {
+      try { videoElementRef.current.pause(); } catch (e) { }
+    }
+    if (youtubeId && youtubePlayerRef.current) {
+      try { youtubePlayerRef.current.pauseVideo(); } catch (e) { }
+    }
+    seekToPosition(targetPos);
+  };
+
   // Play video strictly from start of clip time to end clip time
   const playClipFromStart = (startPos?: number) => {
     const target = startPos !== undefined ? startPos : trimRange[0];
@@ -1726,6 +1739,7 @@ export default function ClipFlowEditor() {
     lastSeekTimeRef.current = Date.now();
     setCurrentTime(target);
     setIsPlaying(true);
+    isPlayingRef.current = true;
 
     if (youtubeId && youtubePlayerRef.current) {
       try {
@@ -1746,6 +1760,7 @@ export default function ClipFlowEditor() {
       } catch (e) { }
     }
   };
+  void playClipFromStart;
 
   // Play / Pause toggle
   const togglePlay = () => {
@@ -1840,6 +1855,9 @@ export default function ClipFlowEditor() {
     // 9. ONLY THEN play target player if isPlaying
     if (isPlayingRef.current) {
       safePlayPlayer(newActiveTag);
+    } else {
+      safePausePlayer(newActiveTag);
+      safePausePlayer(newStandbyTag);
     }
 
     // 10. Prepare following chunk (expectedOffset + 5) in the now-inactive standby player (MUST REMAIN PAUSED)
@@ -1877,6 +1895,8 @@ export default function ClipFlowEditor() {
     if (playerTag === activeLivePlayerRef.current) {
       if (isPlayingRef.current && video.paused) {
         safePlayPlayer(playerTag);
+      } else if (!isPlayingRef.current) {
+        safePausePlayer(playerTag);
       }
       return;
     }
@@ -1902,6 +1922,7 @@ export default function ClipFlowEditor() {
       return;
     }
     if (isSeekingLiveRef.current) return;
+    if (!isPlayingRef.current) return;
 
     const currentTimelineTime = activeOffset + v.currentTime;
     setCurrentTime(currentTimelineTime);
@@ -1967,6 +1988,10 @@ export default function ClipFlowEditor() {
       return;
     }
     if (isSeekingLiveRef.current) return;
+    if (!isPlayingRef.current) {
+      safePausePlayer(playerTag);
+      return;
+    }
 
     safePausePlayer(playerTag);
 
@@ -3261,6 +3286,18 @@ export default function ClipFlowEditor() {
                           isSeekingRef.current = true;
                           lastSeekTimeRef.current = Date.now();
                           setTrimRange([val[0], val[1]]);
+                          // ALWAYS pause preview on timeline adjustment
+                          setIsPlaying(false);
+                          isPlayingRef.current = false;
+                          safePausePlayer('A');
+                          safePausePlayer('B');
+                          if (videoElementRef.current && !videoElementRef.current.paused) {
+                            try { videoElementRef.current.pause(); } catch (e) { }
+                          }
+                          if (youtubeId && youtubePlayerRef.current) {
+                            try { youtubePlayerRef.current.pauseVideo(); } catch (e) { }
+                          }
+
                           if (!isLiveChannelUrl) {
                             if (val[0] !== trimRange[0]) {
                               setCurrentTime(val[0]);
@@ -3279,12 +3316,18 @@ export default function ClipFlowEditor() {
                                 try { videoElementRef.current.currentTime = val[1]; } catch {}
                               }
                             }
+                          } else {
+                            if (val[0] !== trimRange[0]) {
+                              setCurrentTime(val[0]);
+                            } else if (val[1] !== trimRange[1]) {
+                              setCurrentTime(val[1]);
+                            }
                           }
                         }}
                         onValueCommit={(val) => {
                           setTrimRange([val[0], val[1]]);
-                          // Play video from start of clip time to end of clip time
-                          playClipFromStart(val[0]);
+                          // Pause and seek to start of clip - user clicks Play to start playback
+                          pauseAndSeek(val[0]);
                         }}
                       >
                         <Slider.Track className="relative flex-grow h-full rounded-xl cursor-pointer">
@@ -3328,7 +3371,7 @@ export default function ClipFlowEditor() {
                             const val = parseTime(e.target.value);
                             if (!isNaN(val) && val < trimRange[1]) {
                               setTrimRange([val, trimRange[1]]);
-                              playClipFromStart(val);
+                              pauseAndSeek(val);
                             }
                           }}
                           className="w-16 bg-black/50 border border-white/10 rounded-lg px-1.5 py-1 text-center text-zinc-200 font-bold focus:outline-none focus:border-zinc-400 text-[11px]"
@@ -3340,8 +3383,9 @@ export default function ClipFlowEditor() {
                           onChange={(e) => {
                             const val = parseTime(e.target.value);
                             if (!isNaN(val) && val > trimRange[0]) {
-                              setTrimRange([trimRange[0], Math.min(effectiveDuration > 0 ? effectiveDuration : 9999, val)]);
-                              playClipFromStart(trimRange[0]);
+                              const endVal = Math.min(effectiveDuration > 0 ? effectiveDuration : 9999, val);
+                              setTrimRange([trimRange[0], endVal]);
+                              pauseAndSeek(trimRange[0]);
                             }
                           }}
                           className="w-16 bg-black/50 border border-white/10 rounded-lg px-1.5 py-1 text-center text-zinc-200 font-bold focus:outline-none focus:border-zinc-400 text-[11px]"
