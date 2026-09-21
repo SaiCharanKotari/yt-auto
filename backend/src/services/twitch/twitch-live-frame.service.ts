@@ -385,54 +385,14 @@ export class TwitchLiveFrameService {
     const ext: 'png' | 'jpg' = isPng ? 'png' : 'jpg';
 
     // 4. Check live frame cache
-    const frameCacheKey = `${targetUrl}_chunk_${parsedChunkOffset}_local_${parsedLocalTime.toFixed(3)}_${ext}_${cropFilter}_${quality}`;
+    const frameCacheKey = `${targetUrl}_global_${parsedGlobalTime.toFixed(2)}_${ext}_${cropFilter}_${quality}`;
     const frameHash = crypto.createHash('md5').update(frameCacheKey).digest('hex');
     const framePath = path.join(LIVE_FRAMES_DIR, `live_frame_${frameHash}.${ext}`);
-
-    // Check if chunk is already cached
-    const chunkHash = this.getChunkHash(targetUrl, parsedChunkOffset, 5);
-    const chunkPath = path.join(LIVE_CHUNKS_DIR, `chunk_${chunkHash}.mp4`);
-    const isChunkCached = fs.existsSync(chunkPath) && fs.statSync(chunkPath).size > 1000;
-
-    if (isChunkCached) {
-      console.log(`[LIVE FRAME] Cache HIT chunk=${parsedChunkOffset}`);
-    } else {
-      console.log(`[LIVE FRAME] Cache MISS chunk=${parsedChunkOffset}`);
-    }
-
-    // 5. Ensure the 5-second chunk is ready
-    await this.getOrExtractChunk(targetUrl, parsedChunkOffset, 5, quality);
-
-    // 6. Inspect chunk duration with FFmpeg
-    let chunkDuration = await this.getChunkDuration(chunkPath);
-    console.log(`[LIVE FRAME] Chunk duration=${chunkDuration.toFixed(2)}s`);
-
-    // If chunk is empty/corrupt, remove and retry fresh extraction
-    if (chunkDuration < 0.5) {
-      console.warn(`[LIVE FRAME] Invalid chunk duration (${chunkDuration}s). Retrying fresh extraction...`);
-      try { fs.unlinkSync(chunkPath); } catch {}
-      await this.getOrExtractChunk(targetUrl, parsedChunkOffset, 5, quality);
-      chunkDuration = await this.getChunkDuration(chunkPath);
-      console.log(`[LIVE FRAME] Fresh chunk duration=${chunkDuration.toFixed(2)}s`);
-    }
-
-    // Safe clamp local timestamp within the actual chunk duration
-    let safeLocalTime = parsedLocalTime;
-    if (safeLocalTime >= chunkDuration && chunkDuration > 0) {
-      safeLocalTime = Math.max(0, chunkDuration - 0.05);
-    }
-
-    // Verify requested local timestamp actually exists in the chunk
-    if (parsedLocalTime > chunkDuration + 0.5) {
-      throw new TwitchLiveFrameValidationError(
-        `Requested local timestamp ${parsedLocalTime.toFixed(2)}s exceeds chunk duration (${chunkDuration.toFixed(2)}s) for chunk ${parsedChunkOffset}s.`
-      );
-    }
 
     // If frame is already cached, return immediately
     if (fs.existsSync(framePath) && fs.statSync(framePath).size > 1000) {
       console.log(
-        `[LIVE FRAME] Frame ready chunk=${parsedChunkOffset} local=${safeLocalTime.toFixed(2)} (cached)`
+        `[LIVE FRAME] Frame cache HIT global=${parsedGlobalTime.toFixed(2)}s`
       );
       return {
         filePath: framePath,
@@ -441,16 +401,23 @@ export class TwitchLiveFrameService {
         isPng,
         fromCache: true,
         chunkOffset: parsedChunkOffset,
-        localTime: safeLocalTime,
+        localTime: parsedLocalTime,
         globalTime: parsedGlobalTime,
-        chunkDuration,
+        chunkDuration: 5,
       };
     }
 
-    // 7. Extract frame from MP4 chunk using: -i chunk.mp4 -ss localTime -frames:v 1
-    // Keep -ss AFTER -i for accurate in-chunk decoding
+    // 5. Resolve stream URL directly (shared single-flight cache)
+    console.log(`[LIVE FRAME] Resolving stream for frame @ t=${parsedGlobalTime.toFixed(2)}s...`);
+    const { streamUrl } = await TwitchStreamResolverService.resolveStreamUrl(
+      targetUrl,
+      YTDLP_BIN,
+      quality
+    );
+
+    // 6. Extract frame directly from HLS stream using FFmpeg without creating intermediate MP4 chunks
     console.log(
-      `[LIVE FRAME] Extracting frame chunk=${parsedChunkOffset} local=${safeLocalTime.toFixed(2)}`
+      `[LIVE FRAME] Extracting direct frame global=${parsedGlobalTime.toFixed(2)}s from HLS stream`
     );
 
     const vfParts: string[] = [];
@@ -458,23 +425,23 @@ export class TwitchLiveFrameService {
     const vfOption = vfParts.length > 0 ? `-vf "${vfParts.join(',')}"` : '';
     const qOption = isPng ? '' : '-q:v 1';
 
-    const extractCmd = `"${FFMPEG_BIN}" -y -i "${chunkPath}" -ss ${safeLocalTime.toFixed(3)} -frames:v 1 ${vfOption} ${qOption} "${framePath}"`;
+    const extractCmd = `"${FFMPEG_BIN}" -y -ss ${parsedGlobalTime.toFixed(3)} -i "${streamUrl}" -frames:v 1 ${vfOption} ${qOption} "${framePath}"`;
 
     try {
-      await execAsync(extractCmd, { timeout: 15000 });
+      await execAsync(extractCmd, { timeout: 20000 });
     } catch (extractErr: any) {
       console.error('[Twitch Live Frame] Extraction error:', extractErr.message);
-      throw new Error(`Failed to extract frame at local timestamp ${safeLocalTime.toFixed(2)}s from chunk ${parsedChunkOffset}s: ${extractErr.message}`);
+      throw new Error(`Failed to extract frame at timestamp ${parsedGlobalTime.toFixed(2)}s: ${extractErr.message}`);
     }
 
     if (!fs.existsSync(framePath) || fs.statSync(framePath).size === 0) {
       throw new Error(
-        `FFmpeg produced empty frame for chunk ${parsedChunkOffset}s at local timestamp ${parsedLocalTime.toFixed(2)}s.`
+        `FFmpeg produced empty frame at timestamp ${parsedGlobalTime.toFixed(2)}s.`
       );
     }
 
     console.log(
-      `[LIVE FRAME] Frame ready chunk=${parsedChunkOffset} local=${parsedLocalTime.toFixed(2)}`
+      `[LIVE FRAME] Frame ready global=${parsedGlobalTime.toFixed(2)}s (file size: ${fs.statSync(framePath).size} bytes)`
     );
 
     scheduleCleanup(framePath, 2 * 60 * 60 * 1000); // 2 hours
@@ -488,7 +455,7 @@ export class TwitchLiveFrameService {
       chunkOffset: parsedChunkOffset,
       localTime: parsedLocalTime,
       globalTime: parsedGlobalTime,
-      chunkDuration,
+      chunkDuration: 5,
     };
   }
 }

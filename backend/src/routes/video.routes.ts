@@ -145,7 +145,7 @@ router.get('/hls-proxy', async (req: Request, res: Response) => {
 });
 
 // ─── OPTIONS preflight for CORS video streaming & frame extraction ─────────
-router.options(['/proxy', '/frame', '/thumbnail', '/hls-proxy'], (_req: Request, res: Response) => {
+router.options(['/proxy', '/frame', '/thumbnail', '/hls-proxy', '/proxy-stream'], (_req: Request, res: Response) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Range, Content-Type, Accept, Authorization');
@@ -349,7 +349,7 @@ router.get('/proxy-stream', async (req: Request, res: Response) => {
     } else if (streamUrl.includes('instagram.com') || streamUrl.includes('cdninstagram.com')) {
       fetchHeaders['Referer'] = 'https://www.instagram.com/';
       fetchHeaders['Origin'] = 'https://www.instagram.com';
-    } else if (streamUrl.includes('ttvnw.net') || streamUrl.includes('twitch.tv')) {
+    } else if (streamUrl.includes('ttvnw.net') || streamUrl.includes('twitch.tv') || streamUrl.includes('cloudfront.net')) {
       fetchHeaders['Referer'] = 'https://www.twitch.tv/';
       fetchHeaders['Origin'] = 'https://www.twitch.tv';
       fetchHeaders['Client-ID'] = 'kimne78kx3ncx6brgo4mv6wki5h1ko';
@@ -409,7 +409,17 @@ router.get('/proxy-stream', async (req: Request, res: Response) => {
       return res.status(200).send(rewrittenPlaylist);
     }
 
-    res.setHeader('Content-Type', contentType);
+    // For HLS segments (.ts, .m4s), always set the correct MIME type
+    // Twitch CDN returns binary/octet-stream which hls.js may reject
+    const isTs = streamUrl.toLowerCase().includes('.ts') || streamUrl.toLowerCase().endsWith('-muted.ts');
+    const isM4s = streamUrl.toLowerCase().includes('.m4s');
+    let finalContentType = contentType;
+    if (isTs || finalContentType.toLowerCase().includes('octet-stream')) {
+      finalContentType = 'video/mp2t';
+    } else if (isM4s) {
+      finalContentType = 'video/iso.segment';
+    }
+    res.setHeader('Content-Type', finalContentType);
 
     const contentLength = remoteRes.headers.get('content-length');
     if (contentLength) res.setHeader('Content-Length', contentLength);

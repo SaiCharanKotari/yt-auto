@@ -5,12 +5,29 @@ import {
   TwitchLiveFrameService,
   TwitchLiveFrameValidationError,
 } from '../services/twitch/twitch-live-frame.service.js';
+import { TwitchStreamResolverService } from '../services/twitch/twitch-stream-resolver.service.js';
 import { cleanUnicodeFileName, getSafeContentDisposition } from '../utils/i18n-filename.util.js';
 
 const router = express.Router();
 
-// OPTIONS preflight for live chunk and live frame endpoints
-router.options(['/live-chunk', '/live-frame'], (_req: Request, res: Response) => {
+function resolveYtDlpBinary(): string {
+  const candidates = [
+    path.join(process.cwd(), 'backend', 'yt-dlp.exe'),
+    path.join(process.cwd(), 'yt-dlp.exe'),
+    path.join(process.cwd(), 'backend', 'node_modules', 'yt-dlp-exec', 'bin', 'yt-dlp.exe'),
+    path.join(process.cwd(), 'node_modules', 'yt-dlp-exec', 'bin', 'yt-dlp.exe'),
+    path.join(process.cwd(), 'qt-app', 'bin', 'yt-dlp.exe'),
+  ];
+  for (const c of candidates) {
+    if (fs.existsSync(c)) return c;
+  }
+  return 'yt-dlp';
+}
+
+const YTDLP_BIN = resolveYtDlpBinary();
+
+// OPTIONS preflight for live channel endpoints
+router.options(['/stream-info', '/live-frame', '/live-chunk'], (_req: Request, res: Response) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Range, Content-Type, Accept, Authorization');
@@ -18,72 +35,73 @@ router.options(['/live-chunk', '/live-frame'], (_req: Request, res: Response) =>
   res.status(204).end();
 });
 
-// Clean up cached chunks older than 15 minutes
-function pruneOldChunks() {
-  try {
-    const chunkDir = TwitchLiveFrameService.LIVE_CHUNKS_DIR;
-    if (!fs.existsSync(chunkDir)) return;
-    const now = Date.now();
-    for (const f of fs.readdirSync(chunkDir)) {
-      if (!f.endsWith('.mp4')) continue;
-      const fp = path.join(chunkDir, f);
-      try {
-        if (now - fs.statSync(fp).mtimeMs > 15 * 60 * 1000) {
-          fs.unlinkSync(fp);
-        }
-      } catch {}
-    }
-  } catch {}
-}
-setInterval(pruneOldChunks, 2 * 60 * 1000);
-
 /**
- * GET /api/twitch-live/live-chunk
+ * GET /api/twitch-live/stream-info
  *
- * Extracts a fast 5s–10s 720p MP4 preview chunk from a Twitch live channel or its active DVR recording.
+ * Resolves direct HLS playback information for a Twitch channel, DVR VOD, or clip.
+ * Utilizes single-flight in-flight promise deduplication and caching.
  *
  * Query params:
- *   url  — full Twitch channel URL (e.g. https://www.twitch.tv/noticed_dota2)
- *   t    — start offset in seconds (default: 0)
- *   dur  — chunk duration in seconds (default: 5)
+ *   url     — Twitch URL (e.g. https://www.twitch.tv/channel_name)
+ *   quality — optional quality format limit (e.g. 1080p, 720p)
  */
-router.get('/live-chunk', async (req: Request, res: Response) => {
+router.get('/stream-info', async (req: Request, res: Response) => {
   const targetUrl = (req.query.url as string || '').trim();
-  const startTime = Math.max(0, parseInt((req.query.t as string) || '0', 10));
-  const chunkDuration = Math.min(20, Math.max(2, parseInt((req.query.dur as string) || '5', 10)));
+  const quality = (req.query.quality as string || '').trim();
+  const forceRefresh = req.query.forceRefresh === 'true' || req.query.forceRefresh === '1';
 
   if (!targetUrl) {
     return res.status(400).json({ error: 'url parameter is required' });
   }
 
-  if (!TwitchLiveFrameService.isLiveChannelUrl(targetUrl)) {
-    return res.status(400).json({ error: 'Only live channel URLs are supported. Use /api/twitch for VODs and clips.' });
-  }
-
   try {
-    const { chunkPath } = await TwitchLiveFrameService.getOrExtractChunk(
+    const result = await TwitchStreamResolverService.resolveStreamUrl(
       targetUrl,
-      startTime,
-      chunkDuration,
-      '720p'
+      YTDLP_BIN,
+      quality || undefined,
+      forceRefresh
     );
 
-    const stat = fs.statSync(chunkPath);
-    res.writeHead(200, {
-      'Content-Type': 'video/mp4',
-      'Content-Length': stat.size,
-      'Access-Control-Allow-Origin': '*',
-      'Cache-Control': 'public, max-age=300',
-      'X-Chunk-Start': String(startTime),
-      'X-Chunk-Duration': String(chunkDuration),
+    const host = req.protocol + '://' + req.get('host');
+    let hlsUrl = result.streamUrl;
+    if (result.streamUrl && result.streamUrl.includes('.m3u8')) {
+      hlsUrl = `${host}/api/video/hls-proxy?url=${encodeURIComponent(result.streamUrl)}`;
+    }
+
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    // No HTTP cache when forceRefresh; otherwise 15 min
+    res.setHeader('Cache-Control', forceRefresh ? 'no-cache, no-store' : 'public, max-age=900');
+    return res.json({
+      streamUrl: hlsUrl,
+      rawStreamUrl: result.streamUrl,
+      sourceType: result.sourceType,
+      vodId: result.vodId,
+      channel: result.channel,
     });
-    fs.createReadStream(chunkPath).pipe(res);
   } catch (err: any) {
-    console.error('[Twitch Live Chunk Error]', err.message);
+    console.error('[Twitch Stream Info Error]', err.message);
     if (!res.headersSent) {
-      res.status(500).json({ error: err.message || 'Failed to extract live chunk' });
+      const rawMsg = err.message || '';
+      if (/The channel is not currently live/i.test(rawMsg)) {
+        return res.status(404).json({ error: 'The Twitch channel is not currently live.' });
+      }
+      const cleanMsg = rawMsg
+        .replace(/[A-Za-z]:\\[^\n"]+/g, 'yt-dlp')
+        .replace(/^Command failed:[^\n]+\n/g, '')
+        .trim();
+      return res.status(500).json({ error: cleanMsg || 'Failed to resolve Twitch stream' });
     }
   }
+});
+
+/**
+ * GET /api/twitch-live/live-chunk
+ * DEPRECATED: Chunk-based preview pipeline is replaced by direct HLS playback.
+ */
+router.get('/live-chunk', async (_req: Request, res: Response) => {
+  return res.status(410).json({
+    error: 'Chunk-based preview is deprecated. Please use direct HLS playback via /api/twitch-live/stream-info',
+  });
 });
 
 /**
