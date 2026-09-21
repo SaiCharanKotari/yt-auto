@@ -87,6 +87,7 @@ interface QualityOption {
   height: number;
   format_id: string;
   tbr?: number;
+  isNative?: boolean;
 }
 
 interface AIHighlight {
@@ -208,6 +209,7 @@ export default function ClipFlowEditor() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [isVideoBuffering, setIsVideoBuffering] = useState(false);
   const [currentTime, setCurrentTime] = useState(() => {
+    if (rawUrl && isTwitchLiveChannelUrl(rawUrl)) return 0;
     if (initialTwitchSession && initialTwitchSession.currentTime > 0) return initialTwitchSession.currentTime;
     return initialSession?.currentTime || 0;
   });
@@ -219,24 +221,13 @@ export default function ClipFlowEditor() {
   const [timeInputValue, setTimeInputValue] = useState('');
   const isTrimEnabled = true;
   const [trimRange, setTrimRange] = useState<[number, number]>(() => {
+    if (rawUrl && isTwitchLiveChannelUrl(rawUrl)) return [0, 60];
     if (initialTwitchSession && initialTwitchSession.trimRange) return initialTwitchSession.trimRange;
     return initialSession?.trimRange || [0, 60];
   });
   const [isHelperRunning, setIsHelperRunning] = useState<boolean>(false);
   void isHelperRunning;
 
-  const {
-    twitchHlsUrl,
-    isTwitchLiveChannel,
-    refreshLiveSegment,
-    isLoadingStream: isTwitchStreamLoading,
-    streamError: twitchStreamError,
-  } = useTwitchPreview(isTwitch, activeUrl, metadata, isProUser);
-  void refreshLiveSegment;
-  void isTwitchStreamLoading;
-  void twitchStreamError;
-
-  const isLiveChannelUrl = isTwitchLiveChannel;
   const isPlayingRef = useRef<boolean>(false);
 
   useEffect(() => {
@@ -425,6 +416,21 @@ export default function ClipFlowEditor() {
   const [isQualityMenuOpen, setIsQualityMenuOpen] = useState<boolean>(false);
   const qualityMenuRef = useRef<HTMLDivElement | null>(null);
 
+  // Twitch Live / DVR HLS Preview Hook
+  const currentTwitchPreviewQuality = selectedQualityId || downloadQuality || '1080p';
+  const {
+    twitchHlsUrl,
+    isTwitchLiveChannel,
+    refreshLiveSegment,
+    isLoadingStream: isTwitchStreamLoading,
+    streamError: twitchStreamError,
+  } = useTwitchPreview(isTwitch, activeUrl, metadata, isProUser, currentTwitchPreviewQuality);
+  void refreshLiveSegment;
+  void isTwitchStreamLoading;
+  void twitchStreamError;
+
+  const isLiveChannelUrl = isTwitchLiveChannel;
+
   // Thumbnail vs Current Frame Preview State
   const [previewImageMode, setPreviewImageMode] = useState<'thumbnail' | 'frame'>('thumbnail');
   const [isImageModeDropdownOpen, setIsImageModeDropdownOpen] = useState<boolean>(false);
@@ -557,7 +563,7 @@ export default function ClipFlowEditor() {
       label: t.label,
       height: t.height,
       url: getBestUrlForTier(t.height),
-      isAvailable: heightToUrlMap.has(t.height),
+      isAvailable: isTwitch ? [1080, 720, 480, 360].includes(t.height) : heightToUrlMap.has(t.height),
     }));
 
     return {
@@ -579,9 +585,11 @@ export default function ClipFlowEditor() {
 
   // Current active quality label
   const currentQualityLabel = useMemo(() => {
-    if (selectedQualityId) {
-      const match = previewQualities.find(q => q.id === selectedQualityId);
+    const activeId = selectedQualityId || downloadQuality;
+    if (activeId) {
+      const match = previewQualities.find(q => q.id === activeId || q.id === `${activeId}p` || q.label.toLowerCase().startsWith(activeId.toLowerCase()));
       if (match) return match.label;
+      return activeId;
     }
     if (selectedPreviewQualityUrl) {
       const match = previewQualities.find(q => q.url === selectedPreviewQualityUrl);
@@ -595,7 +603,7 @@ export default function ClipFlowEditor() {
       return previewQualities.find(q => q.id === '1080p')?.label || previewQualities.find(q => q.id === '720p')?.label || previewQualities[0].label;
     }
     return '1080p (Full HD)';
-  }, [selectedQualityId, selectedPreviewQualityUrl, previewQualities, defaultPreviewStreamUrl]);
+  }, [selectedQualityId, downloadQuality, selectedPreviewQualityUrl, previewQualities, defaultPreviewStreamUrl]);
 
   // Handle Quality Switch with seamless time restoration
   const handleSelectPreviewQuality = (qualityItem: { id: string; url: string; label: string }) => {
@@ -605,6 +613,9 @@ export default function ClipFlowEditor() {
     setSelectedQualityId(qualityItem.id);
     setSelectedPreviewQualityUrl(qualityItem.url);
     setIsQualityMenuOpen(false);
+
+    // Sync download quality to match selected quality
+    setDownloadQuality(qualityItem.id);
 
     setTimeout(() => {
       if (videoElementRef.current) {
@@ -621,6 +632,8 @@ export default function ClipFlowEditor() {
     setDownloadQuality(quality);
     const cleanNum = parseInt(quality.replace(/[^\d]/g, ''), 10);
     if (cleanNum) {
+      const qId = `${cleanNum}p`;
+      setSelectedQualityId(qId);
       const match = previewQualities.find((q) => q.height === cleanNum);
       if (match) {
         handleSelectPreviewQuality(match);
@@ -695,12 +708,14 @@ export default function ClipFlowEditor() {
       const hls = new Hls({
         enableWorker: true,
         lowLatencyMode: false,
-        backBufferLength: 300,
-        maxBufferLength: 60,
-        maxMaxBufferLength: 120,
+        backBufferLength: Infinity,
+        maxBufferLength: 120,
+        maxMaxBufferLength: 600,
         maxBufferSize: 60 * 1000 * 1000,
-        liveSyncDurationCount: 3,
-        liveMaxLatencyDurationCount: 10,
+        startPosition: 0,
+        liveSyncDurationCount: 0,
+        liveMaxLatencyDurationCount: Infinity,
+        liveDurationInfinity: false,
         loader: ProxyHlsLoader as any,
       });
 
@@ -727,6 +742,13 @@ export default function ClipFlowEditor() {
           firstLevel: data.firstLevel,
         });
         setIsVideoBuffering(false);
+        // Live streams must start strictly at 0 (or at currentTime if user already set one)
+        if (isTwitch && (!currentTime || currentTime === 0)) {
+          video.currentTime = 0;
+          setCurrentTime(0);
+        } else if (currentTime > 0) {
+          video.currentTime = currentTime;
+        }
         if (isPlayingRef.current) {
           video.play().catch((playErr) => {
             console.log('[ClipFlow ℹ️] Autoplay note:', playErr.message);
@@ -1065,6 +1087,12 @@ export default function ClipFlowEditor() {
         _synthetic: true,
       };
       setMetadata(syntheticMeta);
+      setQualityOptions([
+        { label: '1080p', height: 1080, format_id: '1080p', isNative: true },
+        { label: '720p', height: 720, format_id: '720p', isNative: true },
+        { label: '480p', height: 480, format_id: '480p', isNative: true },
+        { label: '360p', height: 360, format_id: '360p', isNative: true },
+      ]);
       setIsLoadingMeta(false); // Do not show spinner; show live player immediately
       console.log('[ClipFlow 🎬 Twitch] Injected synthetic metadata — live player will render immediately', channelName);
     }
@@ -1202,6 +1230,12 @@ export default function ClipFlowEditor() {
         // For Twitch live, background metadata enrichment failure must NOT replace synthetic metadata with error
         if (isTwitchLiveNow) {
           console.log('[Twitch Metadata] Background enrichment failed, keeping LIVE metadata');
+          setQualityOptions([
+            { label: '1080p', height: 1080, format_id: '1080p', isNative: true },
+            { label: '720p', height: 720, format_id: '720p', isNative: true },
+            { label: '480p', height: 480, format_id: '480p', isNative: true },
+            { label: '360p', height: 360, format_id: '360p', isNative: true },
+          ]);
           return;
         }
         throw new Error(lastErrorMessage || 'Could not fetch video details. Ensure the Desktop Helper app or backend is running.');
@@ -1347,9 +1381,6 @@ export default function ClipFlowEditor() {
           if (v.currentTime >= clipEnd) {
             v.currentTime = clipStart;
             setCurrentTime(clipStart);
-          } else if (v.currentTime < clipStart - 0.5) {
-            v.currentTime = clipStart;
-            setCurrentTime(clipStart);
           }
         } catch (e) { }
       }
@@ -1396,9 +1427,6 @@ export default function ClipFlowEditor() {
             const clipEnd = trimRange[1] > clipStart ? trimRange[1] : (effectiveDuration || clipStart + 60);
             if (!isSeekingRef.current) {
               if (time >= clipEnd) {
-                youtubePlayerRef.current.seekTo(clipStart, true);
-                setCurrentTime(clipStart);
-              } else if (time < clipStart - 0.5) {
                 youtubePlayerRef.current.seekTo(clipStart, true);
                 setCurrentTime(clipStart);
               }
@@ -1501,7 +1529,7 @@ export default function ClipFlowEditor() {
         try { youtubePlayerRef.current.pauseVideo(); } catch (e) { }
         setIsPlaying(false);
       } else {
-        if (currentTime >= clipEnd - 0.1 || currentTime < clipStart) {
+        if (currentTime >= clipEnd - 0.1) {
           youtubePlayerRef.current.seekTo(clipStart, true);
           setCurrentTime(clipStart);
         }
@@ -1515,7 +1543,7 @@ export default function ClipFlowEditor() {
           activeVideo.pause();
           setIsPlaying(false);
         } else {
-          if (activeVideo.currentTime >= clipEnd - 0.1 || activeVideo.currentTime < clipStart) {
+          if (activeVideo.currentTime >= clipEnd - 0.1) {
             activeVideo.currentTime = clipStart;
             setCurrentTime(clipStart);
           }
@@ -1603,9 +1631,8 @@ export default function ClipFlowEditor() {
 
   // Seek backward/forward by seconds
   const seekRelative = (seconds: number) => {
-    const clipStart = trimRange[0];
-    const clipEnd = trimRange[1] > clipStart ? trimRange[1] : (effectiveDuration || clipStart + 60);
-    const newTime = Math.max(clipStart, Math.min(currentTime + seconds, clipEnd));
+    const maxTime = effectiveDuration > 0 ? effectiveDuration : (trimRange[1] || 99999);
+    const newTime = Math.max(0, Math.min(currentTime + seconds, maxTime));
     seekToPosition(newTime);
   };
 
@@ -2271,9 +2298,6 @@ export default function ClipFlowEditor() {
                               const clipStart = trimRange[0];
                               const clipEnd = trimRange[1] > clipStart ? trimRange[1] : (effectiveDuration || clipStart + 60);
                               if (v.currentTime >= clipEnd) {
-                                v.currentTime = clipStart;
-                                setCurrentTime(clipStart);
-                              } else if (v.currentTime < clipStart - 0.5) {
                                 v.currentTime = clipStart;
                                 setCurrentTime(clipStart);
                               }

@@ -24,7 +24,8 @@ export function useTwitchPreview(
   isTwitch: boolean,
   activeUrl: string,
   metadata: any,
-  _isPro: boolean = false
+  _isPro: boolean = false,
+  quality?: string
 ): TwitchStreamInfo {
   const [twitchHlsUrl, setTwitchHlsUrl] = useState<string>('');
   const [sourceType, setSourceType] = useState<'dvr' | 'live' | 'vod' | 'clip' | ''>('');
@@ -60,12 +61,14 @@ export function useTwitchPreview(
       activeUrl,
       targetUrl,
       isTwitchLiveChannel,
+      quality,
       forceRefresh,
     });
 
     try {
+      const qualityParam = quality ? `&quality=${encodeURIComponent(quality)}` : '';
       const refreshParam = forceRefresh ? '&forceRefresh=true' : '';
-      const endpoint = `${BACKEND_URL}/api/twitch-live/stream-info?url=${encodeURIComponent(targetUrl)}${refreshParam}`;
+      const endpoint = `${BACKEND_URL}/api/twitch-live/stream-info?url=${encodeURIComponent(targetUrl)}${qualityParam}${refreshParam}`;
       const res = await fetch(endpoint, { signal: abortController.signal });
 
       if (!res.ok) {
@@ -91,7 +94,7 @@ export function useTwitchPreview(
       setStreamError(err.message || 'Failed to resolve Twitch stream');
       setIsLoadingStream(false);
     }
-  }, [isTwitch, activeUrl, metadata?.webpage_url, isTwitchLiveChannel]);
+  }, [isTwitch, activeUrl, metadata?.webpage_url, isTwitchLiveChannel, quality]);
 
   useEffect(() => {
     if (!isTwitch) {

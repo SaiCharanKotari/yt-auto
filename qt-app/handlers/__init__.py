@@ -99,6 +99,7 @@ def build_universal_download_args(
             url=url,
             target_out=target_out,
             ffmpeg_dir=ffmpeg_dir,
+            quality=quality,
             is_audio=is_audio,
             audio_format=audio_format,
             audio_quality=audio_quality,

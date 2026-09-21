@@ -203,6 +203,7 @@ def build_twitch_download_args(
     url: str,
     target_out: str,
     ffmpeg_dir: Optional[str] = None,
+    quality: str = "1080",
     is_audio: bool = False,
     audio_format: str = "mp3",
     audio_quality: str = "320",
@@ -221,7 +222,11 @@ def build_twitch_download_args(
     if is_audio:
         args.extend(["-x", "--audio-format", audio_format, "--audio-quality", audio_quality])
     else:
-        args.extend(["-f", "bestvideo+bestaudio/best", "--merge-output-format", "mp4"])
+        clean_q = str(quality).lower().replace("p", "").strip()
+        if clean_q and clean_q not in ["source", "best", "max"]:
+            args.extend(["-f", f"bestvideo[height<={clean_q}]+bestaudio/best[height<={clean_q}]/best", "--merge-output-format", "mp4"])
+        else:
+            args.extend(["-f", "bestvideo+bestaudio/best", "--merge-output-format", "mp4"])
 
     args.extend(["--no-playlist", "-o", target_out, url])
     return args
