@@ -28,6 +28,7 @@ import { EditorSidebar } from '../components/EditorSidebar';
 import { CropFrameOverlay, type CropBox } from '../components/CropFrameOverlay';
 import { useTwitchPreview } from '../components/Twitch/useTwitchPreview';
 import { isTwitchLiveChannelUrl } from '../components/Twitch/useTwitchLiveChannel';
+import { exportTwitchClipInBrowser } from '../services/browserTwitchExporter';
 import { saveTwitchSession, getTwitchSession } from '../utils/twitchChunkStorage';
 import { getCachedMetadata, setCachedMetadata } from '../utils/metadataCache';
 import {
@@ -1800,6 +1801,55 @@ export default function ClipFlowEditor() {
         cropPosition: cropPosition,
         customFileName: customFileName || metadata?.title || 'ClipFlow_Video',
       };
+
+      // ── Twitch Browser-Side Export Pipeline (100% Client-Side FFmpeg.wasm) ──
+      if (isTwitch && twitchHlsUrl && downloadFormat !== 'captions') {
+        console.log('%c═══════════════════════════════════════════════════', 'color: #a855f7;');
+        console.log('%c[ClipFlow Studio ⚡ BROWSER-SIDE TWITCH EXPORT INITIATED]', 'color: #a855f7; font-weight: bold; font-size: 13px;', {
+          twitchHlsUrl,
+          effectiveTrimStart,
+          effectiveTrimEnd,
+          downloadQuality,
+          effectiveFormat,
+        });
+        console.log('%c═══════════════════════════════════════════════════', 'color: #a855f7;');
+
+        setStatusMessage('⚡ Initializing browser video engine...');
+
+        await exportTwitchClipInBrowser({
+          manifestUrl: twitchHlsUrl,
+          trimStart: effectiveTrimStart,
+          trimEnd: effectiveTrimEnd,
+          customFileName: customFileName || metadata?.title || 'Twitch_Clip',
+          format: effectiveFormat,
+          quality: downloadQuality,
+          aspectRatio: aspectRatio === '16:9' ? undefined : aspectRatio,
+          fitMode: fitMode,
+          cropPosition: cropPosition,
+          cropBox: (aspectRatio === 'custom' || fitMode === 'crop') ? cropBox : undefined,
+          audioBitrate: downloadAudioBitrate,
+          onProgress: (msg) => {
+            setStatusMessage(msg);
+          },
+        });
+
+        setDownloadStatus('success');
+        setStatusMessage('Clip generated & downloaded directly to your computer!');
+        setTimeout(() => {
+          setStatusMessage('');
+          setDownloadStatus('idle');
+        }, 2500);
+
+        saveToHistory({
+          title: customFileName || metadata?.title || 'Twitch Clip',
+          url: activeUrl,
+          platform: 'twitch',
+          format: effectiveFormat,
+          quality: downloadQuality,
+          duration: Math.max(1, effectiveTrimEnd - effectiveTrimStart),
+        });
+        return;
+      }
 
       if (exportMode === 'pro') {
         if (!isAuthenticated || !isPro) {
